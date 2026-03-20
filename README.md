@@ -17,6 +17,38 @@ Key Features
 ________________________________________
 Architecture
 API → Orchestrator → Agents → LLM Router → Providers
+
+Architecture Diagram
+             ┌──────────────┐
+             │   FastAPI    │
+             │   (API)      │
+             └──────┬───────┘
+                    │
+                    ▼
+            ┌──────────────────┐
+            │  Orchestrator    │
+            │ (Workflow Brain) │
+            └──────┬───────────┘
+                   │
+      ┌────────────┼────────────┐
+      ▼            ▼            ▼
+   ┌────────┐  ┌──────────┐  ┌──────────┐
+   │ Fraud  │  │ Medical  │  │ Policy   │
+   │ Agent  │  │ Agent    │  │ Agent    │
+   └────┬───┘  └────┬─────┘  └────┬─────┘
+        │            │            │
+        └────────────┼────────────┘
+                     ▼
+             ┌──────────────┐
+             │ LLM Router   │
+             │ (Abstraction)│
+             └──────┬───────┘
+                    │
+     ┌──────────────┼──────────────┐
+     ▼              ▼              ▼
+ ┌────────┐   ┌──────────┐   ┌──────────┐
+ │ OpenAI │   │ Ollama   │   │OpenRouter│
+ └────────┘   └──────────┘   └──────────┘
 ________________________________________
 Tech Stack
   •	FastAPI
@@ -59,4 +91,3 @@ Future Enhancements
 ________________________________________
 Author
 Jai – Consulting AI Data Engineer | AI Architect (in progress)
-
