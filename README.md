@@ -1,12 +1,13 @@
 InsurFlow AI Platform
-A production-grade multi-agent AI system for intelligent insurance claims processing.
+Production-Grade Multi-Agent AI Architecture (Insurance Domain)
 ________________________________________
 Overview
 InsurFlow AI Platform simulates a real-world insurance decision engine using modern AI architecture patterns:
-  •	Multi-LLM Routing Layer
-  •	Agent-based decision making
-  •	Async orchestration
-  •	Local LLM integration (Ollama)
+  •	Multi-LLM routing (Ollama, OpenAI, OpenRouter)
+  •	Async agent orchestration
+  •	Hybrid AI (Rules + ML + LLM)
+  •	Clean modular architecture
+  •	Real-time claim decisioning
 ________________________________________
 Key Features
   •	Multi-LLM Routing (OpenAI, Ollama, OpenRouter)
@@ -14,6 +15,12 @@ Key Features
   •	Async execution using asyncio
   •	Clean modular architecture
   •	Cost-efficient local LLM (phi3 via Ollama)
+________________________________________
+Use Cases
+  •	Fraud Detection
+  •	Claim Adjudication
+  •	Decision Intelligence Systems
+  •	AI Agent Orchestration Platforms
 ________________________________________
 Architecture
 API → Orchestrator → Agents → LLM Router → Providers
