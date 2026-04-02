@@ -57,6 +57,7 @@ class LLMService:
         context: Optional[str] = None,
         generation_kwargs: Optional[Dict[str, Any]] = None,
         provider: Optional[str] = None,
+        claim_id: Optional[str] = None,
     ) -> LLMCompletion:
         # Production note: keep prompt construction here so all agents remain transport-agnostic.
         model_to_use = model or self._default_model_name
@@ -70,5 +71,6 @@ class LLMService:
             model=model_to_use,
             generation_kwargs=generation_kwargs,
             provider=provider,
+            claim_id=claim_id,
         )
 

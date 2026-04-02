@@ -1,104 +1,149 @@
-InsurFlow AI Platform
-Production-Grade Multi-Agent AI Architecture (Insurance Domain)
-________________________________________
-Overview
-InsurFlow AI Platform simulates a real-world insurance decision engine using modern AI architecture patterns:
-  •	Multi-LLM routing (Ollama, OpenAI, OpenRouter)
-  •	Async agent orchestration
-  •	Hybrid AI (Rules + ML + LLM)
-  •	Clean modular architecture
-  •	Real-time claim decisioning
-________________________________________
-Key Features
-  •	Multi-LLM Routing (OpenAI, Ollama, OpenRouter)
-  •	Agent-based architecture (Fraud Agent)
-  •	Async execution using asyncio
-  •	Clean modular architecture
-  •	Cost-efficient local LLM (phi3 via Ollama)
-________________________________________
-Use Cases
-  •	Fraud Detection
-  •	Claim Adjudication
-  •	Decision Intelligence Systems
-  •	AI Agent Orchestration Platforms
-________________________________________
-Architecture
-API → Orchestrator → Agents → LLM Router → Providers
+# InsurFlow AI (Micro-insurance)
 
-Architecture Diagram
-             ┌──────────────┐
-             │   FastAPI    │
-             │   (API)      │
-             └──────┬───────┘
-                    │
-                    ▼
-            ┌──────────────────┐
-            │  Orchestrator    │
-            │ (Workflow Brain) │
-            └──────┬───────────┘
-                   │
-      ┌────────────┼────────────┐
-      ▼            ▼            ▼
-   ┌────────┐  ┌──────────┐  ┌──────────┐
-   │ Fraud  │  │ Medical  │  │ Policy   │
-   │ Agent  │  │ Agent    │  │ Agent    │
-   └────┬───┘  └────┬─────┘  └────┬─────┘
-        │            │            │
-        └────────────┼────────────┘
-                     ▼
-             ┌──────────────┐
-             │ LLM Router   │
-             │ (Abstraction)│
-             └──────┬───────┘
-                    │
-     ┌──────────────┼──────────────┐
-     ▼              ▼              ▼
- ┌────────┐   ┌──────────┐   ┌──────────┐
- │ OpenAI │   │ Ollama   │   │OpenRouter│
- └────────┘   └──────────┘   └──────────┘
-________________________________________
-Tech Stack
-  •	FastAPI
-  •	Python (Asyncio)
-  •	Ollama (Local LLM)
-  •	Pydantic
-  •	Clean Architecture
-________________________________________
-Getting Started
-1. Install dependencies
-  pip install -r requirements.txt
-2. Setup environment
-  Create .env file:
-  LLM_PROVIDER=ollama
-  MODEL_NAME=phi3
-  OLLAMA_BASE_URL=http://localhost:11434
-3. Run server
-  uvicorn app.main:app --reload
-________________________________________
-API Example
-POST /claim
-{
-  "claimant_name": "John Doe",
-  "claim_amount": 12345,
-  "incident_type": "theft"
-}
-Response
-{
-  "fraud_score": 0.2,
-  "reason": "The claim amount is high for the reported incident type..."
-}
-________________________________________
-Future Enhancements
-  •	Multi-agent orchestration (Fraud, Medical, Policy)
-  •	Decision engine
-  •	Confidence scoring
-  •	Vector memory (ChromaDB)
-  •	Observability (logs, metrics)
-  •	UI dashboard
-________________________________________
-Author
-Jai – Consulting AI Data Engineer | AI Architect (in progress)
+Local MVP for **small-ticket claim triage**: **FastAPI** + **Ollama** (LLM + embeddings) + **ChromaDB** (embedded, persistent). No extra infrastructure required.
 
-Note:
-This project is a proof-of-concept (POC) and reference implementation inspired by real-world enterprise AI systems. Actual production implementations involve confidential data and cannot be publicly shared.
+## What it does
 
+- Ingests a micro-insurance claim and returns **`APPROVED`**, **`REJECTED`**, or **`INVESTIGATE`**.
+- Runs **fraud analysis** (LLM, structured JSON) and **policy checks** (rules) **in parallel**, then a **decision** agent.
+- **Retrieves similar past claims** from vector memory, applies **weighted ranking** (review signals + coherence with majority reviewed outcomes).
+- **Calibrates confidence** against human-reviewed similar cases (keeps raw `confidence_score` and adds `calibrated_confidence`).
+- Flags **human-in-the-loop (HITL)** when the decision is `INVESTIGATE`, or when **`calibrated_confidence`** is below **0.75** (see `HitlService` in `app/core/dependencies.py`).
+- **Persists** each processed claim (embedding + metadata) for future retrieval and learning.
+- Exposes **structured logs**, in-process **metrics**, and a **minimal web UI** at `/ui`.
+
+## Architecture
+
+```
+FastAPI
+   └── InsurFlowOrchestrator
+          ├── EmbeddingService (Ollama) → VectorStore (Chroma) — similar claims
+          ├── FraudAgent (LLM)     ─┐
+          ├── PolicyAgent (rules)  ─┼─→ DecisionAgent → HITL
+          └── store_claim (single upsert when embedding OK)
+```
+
+**LLM routing:** `LLMService` → `LLMRouter` (retries with backoff, timeouts, optional provider fallbacks). Providers: **Ollama** (default), **OpenAI** and **OpenRouter** if API keys are set. Heuristic **USD cost** estimates use `LLM_COST_USD_PER_1K_*` when set.
+
+**Generic inference:** `POST /inference` accepts optional `task`: `cheap` forces **Ollama**, `complex` forces **OpenAI** (if configured).
+
+**Agents (implemented):**
+
+| Agent | Role |
+|--------|------|
+| **FraudAgent** | LLM JSON: `fraud_score`, fraud-level `decision`/`confidence`, `entities`, structured `explanation` (summary, key factors, optional similar-case reference). |
+| **PolicyAgent** | Validates `policy_limit`, `claim_amount`, and amount ≤ limit. |
+| **DecisionAgent** | Combines fraud + policy into final triage outcome and `confidence_score`. |
+
+## Tech stack
+
+- Python 3.10+, **FastAPI**, **Pydantic v2**, **httpx**, **python-dotenv**
+- **Ollama** — chat completions (`/api/generate`) and embeddings (`/api/embeddings`)
+- **ChromaDB** — persistent local vector store
+
+## Getting started
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Environment
+
+Create a `.env` file (example):
+
+```env
+LLM_PROVIDER=ollama
+MODEL_NAME=phi3
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+CHROMA_PERSIST_DIR=./chroma_db
+CHROMA_COLLECTION=claims
+```
+
+Optional: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `LLM_FALLBACK_PROVIDERS`, `LLM_RETRIES`, `LLM_COST_USD_PER_1K_INPUT_TOKENS`, `LLM_COST_USD_PER_1K_OUTPUT_TOKENS`, etc. See `app/core/config.py`.
+
+**LLM timeouts:** Default `LLM_TIMEOUT_S` is **180** seconds so local Ollama (e.g. Phi-3 on CPU) can finish long fraud JSON generations. If you see `LLM timeout ... attempt=1/3`, either wait for retries, raise `LLM_TIMEOUT_S`, or use a smaller/faster model.
+
+### 3. Pull Ollama models
+
+```bash
+ollama pull phi3
+ollama pull nomic-embed-text
+```
+
+Start **Ollama** before the API.
+
+### 4. Run the server
+
+```bash
+uvicorn app.main:app --reload
+```
+
+- **API docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Service info:** `GET /` (links to docs and `/ui`)
+- **Health:** `GET /health`
+- **Metrics:** `GET /metrics` — process-local counters plus `vector_store_claim_documents` from Chroma; includes `metrics_scope` explaining reset-on-restart behavior
+- **Dashboard:** [http://localhost:8000/ui](http://localhost:8000/ui)
+
+## API overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Service info and links |
+| `GET` | `/health` | Liveness |
+| `GET` | `/metrics` | Snapshot: `total_claims_processed`, `hitl_triggered_count`, `reviewed_claims_count` (in-memory, reset when the process restarts), `metrics_scope`, and `vector_store_claim_documents` from Chroma. |
+| `POST` | `/claims` | Process a claim (same pipeline as `POST /claim`) |
+| `GET` | `/claims` | List stored claims from Chroma (MVP: up to **200** rows, fixed offset **0**) |
+| `POST` | `/claims/{claim_id}/review` | Human review: `APPROVED` or `REJECTED`; updates metadata in the vector store (restores minimal explanation/entities if missing on legacy rows). |
+| `POST` | `/claim` | Process a claim (same as `POST /claims`; lives on the inference router for OpenAPI grouping) |
+| `GET` | `/claim/samples` | Sample `ClaimRequest` payloads from `app/data/claims/sample_claims.json` |
+| `POST` | `/inference` | Generic LLM completion (`prompt`, optional `context`, `model`, optional `task` hint — see above) |
+
+### Process a claim
+
+`POST /claims` or `POST /claim` — body: `ClaimRequest` (`claim_id`, `claim_amount`, `policy_limit`, plus optional fields such as `description`, `currency`, `product_code`, `incident_date`, `policyholder_id`). **Unknown top-level JSON keys are rejected** (`extra="forbid"`).
+
+If `description` is empty, the orchestrator embeds a **JSON snapshot of the claim** for retrieval so similar-case context still has text to work with.
+
+Response highlights:
+
+- `decision` — `APPROVED` | `REJECTED` | `INVESTIGATE`
+- `confidence_score` — raw decision confidence
+- `calibrated_confidence` — adjusted using similar claims with human `review_status`
+- `hitl_needed` — whether manual review is recommended
+- `agent_outputs` — `fraud`, `policy`, `decision` details
+
+### Human review
+
+```http
+POST /claims/MIC-2026-00412/review
+Content-Type: application/json
+
+{"action": "APPROVED", "reviewed_by": "optional reviewer id"}
+```
+
+## Resilience (MVP)
+
+- LLM calls: **timeouts** and **retries** (router); failures logged with **`claim_id`** when provided.
+- Embedding or retrieval failure: API **does not crash**; vector **write is skipped** for that request.
+- Fraud LLM failure or invalid parse: safe fallback **`INVESTIGATE`** / **0.5** (unless policy invalid → **`REJECTED`**).
+
+## Project layout (main)
+
+- `app/main.py` — FastAPI app, router includes, `/ui` static mount; disables noisy Chroma telemetry in local dev
+- `app/agents/` — orchestrator, fraud, policy, decision, base agent
+- `app/api/routes/health.py` — `/`, `/health`, `/metrics`
+- `app/api/routes/claims.py` — `POST/GET /claims`, `POST /claims/{claim_id}/review`
+- `app/api/routes/inference.py` — `POST /claim`, `GET /claim/samples`, `POST /inference`
+- `app/services/` — `llm_service`, `llm/router` + providers, `embedding_service`, `vector_store`, `hitl_service`, `metrics`, `claim_samples_service`
+- `app/core/` — `config` (`Settings`), `dependencies` (service factories)
+- `app/web/` — static dashboard (`index.html`, `app.js`)
+- `chroma_db/` (default) — persistent Chroma data; path set by `CHROMA_PERSIST_DIR`
+
+## Author
+
+Jai — Consulting AI Data Engineer | AI Architect (in progress)
+
+**Note:** This repository is a proof-of-concept and reference implementation. Production systems handling confidential data require additional security, governance, and operations beyond this MVP.

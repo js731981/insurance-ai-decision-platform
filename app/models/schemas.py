@@ -97,4 +97,36 @@ class ClaimProcessResponse(BaseModel):
     claim_id: str
     decision: ClaimDecision
     confidence_score: float = Field(ge=0.0, le=1.0)
+    calibrated_confidence: float = Field(ge=0.0, le=1.0)
+    hitl_needed: bool = Field(default=False)
     agent_outputs: Dict[str, Any]
+
+
+ReviewAction = Literal["APPROVED", "REJECTED"]
+
+
+class ClaimReviewRequest(BaseModel):
+    action: ReviewAction
+    reviewed_by: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional reviewer id or label for the learning loop.",
+    )
+
+
+class ClaimListItem(BaseModel):
+    claim_id: str
+    claim_description: str = Field(default="")
+    fraud_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    decision: Optional[ClaimDecision] = None
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    explanation: Optional[str] = Field(default=None, description="Fraud analyst explanation (bullets or text).")
+    review_status: Optional[ReviewAction] = Field(
+        default=None,
+        description="Human review outcome when present (feeds learning loop).",
+    )
+    hitl_needed: bool = Field(default=False)
+    reviewed_action: Optional[ReviewAction] = None
+    reviewed_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    entities: Optional[Dict[str, Any]] = Field(default=None, description="Structured hints from fraud agent.")

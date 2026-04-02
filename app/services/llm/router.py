@@ -66,6 +66,7 @@ class LLMRouter:
         model: str,
         provider: Optional[str] = None,
         generation_kwargs: Optional[Dict[str, Any]] = None,
+        claim_id: Optional[str] = None,
     ) -> LLMCompletion:
         provider_chain: List[str] = []
 
@@ -100,12 +101,14 @@ class LLMRouter:
                     prompt=prompt,
                     model=model,
                     generation_kwargs=generation_kwargs,
+                    claim_id=claim_id,
                 )
             except BaseException as exc:  # noqa: BLE001
                 last_error = exc
                 self._logger.error(
-                    "LLM provider failed provider=%s err=%s",
+                    "LLM provider failed provider=%s claim_id=%s err=%s",
                     provider_name,
+                    claim_id or "",
                     exc,
                 )
 
@@ -122,6 +125,7 @@ class LLMRouter:
         prompt: str,
         model: str,
         generation_kwargs: Optional[Dict[str, Any]],
+        claim_id: Optional[str] = None,
     ) -> LLMCompletion:
         last_retryable_error: Optional[BaseException] = None
 
@@ -160,8 +164,9 @@ class LLMRouter:
 
                 delay = self._compute_delay_s(attempt)
                 self._logger.warning(
-                    "LLM timeout provider=%s attempt=%s/%s delay_s=%.2f timeout_s=%.2f",
+                    "LLM timeout provider=%s claim_id=%s attempt=%s/%s delay_s=%.2f timeout_s=%.2f",
                     provider_name,
+                    claim_id or "",
                     attempt,
                     self._retry_policy.max_attempts,
                     delay,
@@ -178,8 +183,9 @@ class LLMRouter:
 
                 delay = self._compute_delay_s(attempt)
                 self._logger.warning(
-                    "Retrying LLM provider=%s attempt=%s/%s delay_s=%.2f status=%s",
+                    "Retrying LLM provider=%s claim_id=%s attempt=%s/%s delay_s=%.2f status=%s",
                     provider_name,
+                    claim_id or "",
                     attempt,
                     self._retry_policy.max_attempts,
                     delay,
@@ -194,8 +200,9 @@ class LLMRouter:
 
                 delay = self._compute_delay_s(attempt)
                 self._logger.warning(
-                    "Retrying LLM provider=%s attempt=%s/%s delay_s=%.2f err=%s",
+                    "Retrying LLM provider=%s claim_id=%s attempt=%s/%s delay_s=%.2f err=%s",
                     provider_name,
+                    claim_id or "",
                     attempt,
                     self._retry_policy.max_attempts,
                     delay,
