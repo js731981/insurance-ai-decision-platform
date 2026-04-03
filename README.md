@@ -21,14 +21,52 @@ Local MVP for **small-ticket claim triage**: **FastAPI** + **Ollama** (LLM + emb
 
 ## Architecture
 
-```
-FastAPI
-   └── InsurFlowOrchestrator
-          ├── EmbeddingService (Ollama) → VectorStore (Chroma) — similar claims
-          ├── FraudAgent (LLM)     ─┐
-          ├── PolicyAgent (rules)  ─┼─→ DecisionAgent → HITL
-          └── store_claim (single upsert when embedding OK)
-```
+User Claim
+   ↓
+API (FastAPI)
+   ↓
+Orchestrator
+   ↓
+ ┌───────────────┐
+ │ Fraud Agent   │ (LLM)
+ │ Policy Agent  │ (Rules)
+ └───────────────┘
+        ↓
+Decision Agent
+        ↓
+HITL Layer
+        ↓
+Vector DB (Chroma)
+        ↓
+Analytics + UI
+
+────────────────────────────────────────────
+Decision Pipeline (Multi-Agent System)
+────────────────────────────────────────────
+    ├── Embedding Service (Ollama)
+    │       ↓
+    │   Vector Store (Chroma)
+    │       → Retrieves similar claims (RAG context)
+    │
+    ├── Fraud Agent (LLM-based reasoning)
+    ├── Policy Agent (Rule-based validation)
+    │
+    └── Decision Agent (Fusion Layer)
+            ↓
+        HITL (Human-in-the-Loop)
+            ↓
+────────────────────────────────────────────
+Memory Layer (Atomic Write)
+────────────────────────────────────────────
+    └── store_claim()
+          → Embedding + Metadata (single upsert)
+          → Enables future retrieval & learning
+
+• Context-aware decisioning using retrieval (RAG)
+• Hybrid intelligence (LLM + rules + metadata)
+• Feedback-driven learning via HITL
+• Atomic memory design for consistency
+• Modular and extensible architecture
 
 **LLM routing:** `LLMService` → `LLMRouter` (retries with backoff, timeouts, optional provider fallbacks). Providers: **Ollama** (default), **OpenAI** and **OpenRouter** if API keys are set. Heuristic **USD cost** estimates use `LLM_COST_USD_PER_1K_*` when set.
 
@@ -183,6 +221,10 @@ Read-only endpoints over all paginated claim rows in the vector store. OpenAPI: 
 - `app/core/` — `config` (`Settings`), `dependencies` (service factories)
 - `app/web/` — static dashboard (`index.html`, `app.js`)
 - `chroma_db/` (default) — persistent Chroma data; path set by `CHROMA_PERSIST_DIR`
+
+
+## Disclaimer
+This project is an independent implementation inspired by real-world systems and does not contain any proprietary information.
 
 ## Author
 
