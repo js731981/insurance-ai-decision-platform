@@ -383,11 +383,20 @@ def _validate_claim_metadata(meta: dict[str, Any], *, claim_id: str) -> None:
         "timestamp",
         "explanation",
         "review_status",
+        "case_status",
+        "assigned_to",
+        "assigned_at",
+        "updated_at",
     )
     meta.setdefault("claim_id", claim_id)
     meta.setdefault("timestamp", _utc_now_iso())
     meta.setdefault("explanation", "")
     meta.setdefault("review_status", "")
+    meta.setdefault("case_status", "NEW")
+    meta.setdefault("assigned_to", "")
+    meta.setdefault("assigned_at", "")
+    if not str(meta.get("updated_at") or "").strip():
+        meta["updated_at"] = str(meta.get("timestamp") or _utc_now_iso())
 
     missing = [k for k in required if k not in meta]
     if missing:

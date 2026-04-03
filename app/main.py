@@ -13,6 +13,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.api.routes.analytics import router as analytics_router
+from app.api.routes.cases import router as cases_router
 from app.api.routes.health import router as health_router
 from app.api.routes.claims import router as claims_router
 from app.api.routes.inference import router as inference_router
@@ -31,6 +33,8 @@ app.mount("/ui", StaticFiles(directory=str(_web_dir), html=True), name="ui")
 app.include_router(health_router)
 app.include_router(inference_router)
 app.include_router(claims_router)
+app.include_router(cases_router)
+app.include_router(analytics_router)
 
 
 @app.on_event("startup")

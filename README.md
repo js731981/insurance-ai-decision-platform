@@ -10,6 +10,8 @@ Local MVP for **small-ticket claim triage**: **FastAPI** + **Ollama** (LLM + emb
 - **Calibrates confidence** against human-reviewed similar cases (keeps raw `confidence_score` and adds `calibrated_confidence`).
 - Flags **human-in-the-loop (HITL)** when the decision is `INVESTIGATE`, or when **`calibrated_confidence`** is below **0.75** (see `HitlService` in `app/core/dependencies.py`).
 - **Persists** each processed claim (embedding + metadata) for future retrieval and learning.
+- Supports an **investigator case workflow** on top of stored claims: list/filter cases, **assign** from `NEW` → `ASSIGNED`, and advance status (`ASSIGNED` → `IN_PROGRESS` → `RESOLVED`) via dedicated endpoints.
+- Serves **analytics** over Chroma-backed claims: summary aggregates, anomaly-style alerts, and a fraud-score leaderboard.
 - Exposes **structured logs**, in-process **metrics**, and a **minimal web UI** at `/ui`.
 
 ## Architecture
@@ -85,7 +87,7 @@ uvicorn app.main:app --reload
 - **Service info:** `GET /` (links to docs and `/ui`)
 - **Health:** `GET /health`
 - **Metrics:** `GET /metrics` — process-local counters plus `vector_store_claim_documents` from Chroma; includes `metrics_scope` explaining reset-on-restart behavior
-- **Dashboard:** [http://localhost:8000/ui](http://localhost:8000/ui)
+- **Dashboard:** [http://localhost:8000/ui](http://localhost:8000/ui) — claim list, **case** assign/status, and **analytics** (summary, anomalies, leaderboard)
 
 ## API overview
 
@@ -96,6 +98,12 @@ uvicorn app.main:app --reload
 | `GET` | `/metrics` | Snapshot: `total_claims_processed`, `hitl_triggered_count`, `reviewed_claims_count` (in-memory, reset when the process restarts), `metrics_scope`, and `vector_store_claim_documents` from Chroma. |
 | `POST` | `/claims` | Process a claim (same pipeline as `POST /claim`) |
 | `GET` | `/claims` | List stored claims from Chroma (MVP: up to **200** rows, fixed offset **0**) |
+| `GET` | `/cases` | List cases derived from stored claims (up to **500**); optional query: `case_status`, `assigned_to`, `unassigned_only` |
+| `POST` | `/cases/{claim_id}/assign` | Assign investigator when `case_status` is `NEW` → sets `ASSIGNED`, `assigned_to`, timestamps |
+| `POST` | `/cases/{claim_id}/status` | Update workflow: `IN_PROGRESS` (from `ASSIGNED`) or `RESOLVED` (from `IN_PROGRESS`); use assign endpoint for `NEW` → `ASSIGNED` |
+| `GET` | `/analytics/summary` | Aggregated stats over stored claims (decisions, review buckets, volumes, etc.) |
+| `GET` | `/analytics/anomalies` | Heuristic alerts (e.g. high fraud, investigate decisions, review mismatches) |
+| `GET` | `/analytics/leaderboard` | Top claims by fraud score; query: `limit` (1–200), optional `min_fraud_score` |
 | `POST` | `/claims/{claim_id}/review` | Human review: `APPROVED` or `REJECTED`; updates metadata in the vector store (restores minimal explanation/entities if missing on legacy rows). |
 | `POST` | `/claim` | Process a claim (same as `POST /claims`; lives on the inference router for OpenAPI grouping) |
 | `GET` | `/claim/samples` | Sample `ClaimRequest` payloads from `app/data/claims/sample_claims.json` |
@@ -124,6 +132,32 @@ Content-Type: application/json
 {"action": "APPROVED", "reviewed_by": "optional reviewer id"}
 ```
 
+### Case workflow
+
+Case metadata (`case_status`, `assigned_to`, etc.) lives on the same Chroma document as the claim. Valid statuses: **`NEW`**, **`ASSIGNED`**, **`IN_PROGRESS`**, **`RESOLVED`**.
+
+```http
+GET /cases?case_status=NEW&unassigned_only=true
+```
+
+```http
+POST /cases/MIC-2026-00412/assign
+Content-Type: application/json
+
+{"assigned_to": "investigator_1"}
+```
+
+```http
+POST /cases/MIC-2026-00412/status
+Content-Type: application/json
+
+{"case_status": "IN_PROGRESS"}
+```
+
+### Analytics
+
+Read-only endpoints over all paginated claim rows in the vector store. OpenAPI: `/docs` under the **analytics** tag.
+
 ## Resilience (MVP)
 
 - LLM calls: **timeouts** and **retries** (router); failures logged with **`claim_id`** when provided.
@@ -136,8 +170,10 @@ Content-Type: application/json
 - `app/agents/` — orchestrator, fraud, policy, decision, base agent
 - `app/api/routes/health.py` — `/`, `/health`, `/metrics`
 - `app/api/routes/claims.py` — `POST/GET /claims`, `POST /claims/{claim_id}/review`
+- `app/api/routes/cases.py` — `GET /cases`, `POST /cases/{claim_id}/assign`, `POST /cases/{claim_id}/status`
+- `app/api/routes/analytics.py` — `GET /analytics/summary`, `/analytics/anomalies`, `/analytics/leaderboard`
 - `app/api/routes/inference.py` — `POST /claim`, `GET /claim/samples`, `POST /inference`
-- `app/services/` — `llm_service`, `llm/router` + providers, `embedding_service`, `vector_store`, `hitl_service`, `metrics`, `claim_samples_service`
+- `app/services/` — `llm_service`, `llm/router` + providers, `embedding_service`, `vector_store`, `hitl_service`, `metrics`, `claim_samples_service`, `analytics`
 - `app/core/` — `config` (`Settings`), `dependencies` (service factories)
 - `app/web/` — static dashboard (`index.html`, `app.js`)
 - `chroma_db/` (default) — persistent Chroma data; path set by `CHROMA_PERSIST_DIR`

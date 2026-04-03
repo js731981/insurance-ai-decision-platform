@@ -114,6 +114,36 @@ class ClaimReviewRequest(BaseModel):
     )
 
 
+CaseStatus = Literal["NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED"]
+
+
+class CaseAssignRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"assigned_to": "investigator_1"}})
+
+    assigned_to: str = Field(..., min_length=1, max_length=200)
+
+
+class CaseStatusUpdateRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": {"case_status": "IN_PROGRESS"}})
+
+    case_status: CaseStatus
+
+
+class CaseListItem(BaseModel):
+    claim_id: str
+    case_status: str
+    assigned_to: str = ""
+    decision: Optional[ClaimDecision] = None
+    fraud_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    risk_level: str = ""
+    review_status: str = ""
+    timestamp: str = ""
+
+
+class CaseListResponse(BaseModel):
+    cases: list[CaseListItem]
+
+
 class ClaimListItem(BaseModel):
     claim_id: str
     claim_description: str = Field(default="")

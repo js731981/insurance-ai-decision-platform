@@ -177,6 +177,7 @@ class InsurFlowOrchestrator:
             try:
                 embedding = embedding_for_store
                 expl_str = _explanation_storage_value(fraud_out.get("explanation"))
+                ts = __import__("datetime").datetime.utcnow().isoformat() + "Z"
                 self._vector_store.store_claim(
                     claim_id=claim_id,
                     claim_description=claim_description,
@@ -187,11 +188,15 @@ class InsurFlowOrchestrator:
                         "decision": str(decision_out.get("decision") or ""),
                         "confidence": float(decision_out.get("confidence_score") or 0.0),
                         "entities": fraud_out.get("entities") or {},
-                        "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                        "timestamp": ts,
                         "explanation": expl_str,
                         "review_status": "",
                         "hitl_needed": hitl.needs_hitl,
                         "hitl_reason": hitl.reason or "",
+                        "case_status": "NEW",
+                        "assigned_to": "",
+                        "assigned_at": "",
+                        "updated_at": ts,
                     },
                 )
                 logger.info("claim_stored", extra={"claim_id": claim_id})

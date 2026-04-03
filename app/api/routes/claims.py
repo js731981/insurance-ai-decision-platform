@@ -96,14 +96,20 @@ async def review_claim(
         meta.setdefault("confidence", 0.0)
         meta.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         meta.setdefault("review_status", "")
+        meta.setdefault("case_status", "NEW")
+        meta.setdefault("assigned_to", "")
+        meta.setdefault("assigned_at", "")
+        meta.setdefault("updated_at", meta.get("timestamp") or datetime.now(timezone.utc).isoformat())
+        now = datetime.now(timezone.utc).isoformat()
         meta.update(
             {
                 "review_status": action,
                 "reviewed_action": action,
                 "reviewed_by": body.reviewed_by or "human_reviewer",
-                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "reviewed_at": now,
                 "hitl_needed": False,
                 "hitl_reason": "",
+                "updated_at": now,
             }
         )
         vector_store.store_claim(
