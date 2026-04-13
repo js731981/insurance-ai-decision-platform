@@ -27,11 +27,14 @@ class FraudAnalysisResponse(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+ClaimDecision = Literal["APPROVED", "REJECTED", "INVESTIGATE"]
+
+
 class ClaimRequest(BaseModel):
     """Inbound micro-insurance claim.
 
     Required fields are the three used for routing and policy checks; optional fields are
-    forwarded to the fraud agent as additional context (no unknown top-level keys).
+    forwarded to the fraud agent as additional context (``extra`` is forbidden on unknown keys).
     """
 
     model_config = ConfigDict(
@@ -86,9 +89,14 @@ class ClaimRequest(BaseModel):
         max_length=5000,
         description="Free-text narrative for fraud / context (optional).",
     )
-
-
-ClaimDecision = Literal["APPROVED", "REJECTED", "INVESTIGATE"]
+    rag_filter_decision: Optional[ClaimDecision] = Field(
+        default=None,
+        description="When RAG is enabled, restrict retrieval to stored claims with this decision (metadata).",
+    )
+    rag_metadata_filter: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional scalar equality metadata filter forwarded to the vector store (Chroma `where`).",
+    )
 
 
 class ClaimProcessResponse(BaseModel):

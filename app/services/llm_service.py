@@ -48,6 +48,13 @@ class LLMService:
                 max_delay_s=settings.llm_max_delay_s,
             ),
         )
+        self._providers_for_cleanup = providers
+
+    async def aclose(self) -> None:
+        for p in self._providers_for_cleanup.values():
+            aclose = getattr(p, "aclose", None)
+            if callable(aclose):
+                await aclose()
 
     async def generate(
         self,

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
-    """Ollama embeddings client (local-only, reusable)."""
+    """Ollama embeddings client with a reusable async HTTP session."""
 
     def __init__(
         self,
@@ -21,22 +21,34 @@ class EmbeddingService:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_s = timeout_s
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=httpx.Timeout(timeout_s),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+
+    async def aclose(self) -> None:
+        try:
+            await self._client.aclose()
+        except Exception:  # noqa: BLE001
+            logger.exception("embedding_client_close_failed")
 
     async def embed(self, text: str) -> list[float]:
         text_n = (text or "").strip()
         if not text_n:
             return []
 
-        url = f"{self._base_url}/api/embeddings"
         payload = {"model": self._model, "prompt": text_n}
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                data: Any = resp.json()
+            resp = await self._client.post("/api/embeddings", json=payload)
+            resp.raise_for_status()
+            data: Any = resp.json()
         except Exception:
-            logger.exception("embedding_request_failed", extra={"url": url, "model": self._model})
+            logger.exception(
+                "embedding_request_failed",
+                extra={"base_url": self._base_url, "model": self._model},
+            )
             raise
 
         embedding = _coerce_embedding(data)
@@ -47,9 +59,6 @@ class EmbeddingService:
 
 def _coerce_embedding(data: Any) -> list[float]:
     if isinstance(data, dict):
-        # Common Ollama response shapes:
-        # - {"embedding": [...]}
-        # - {"embeddings": [[...]]}
         emb = data.get("embedding")
         if isinstance(emb, Sequence) and not isinstance(emb, (str, bytes)):
             return [float(x) for x in emb]
@@ -63,3 +72,5 @@ def _coerce_embedding(data: Any) -> list[float]:
             return [float(x) for x in embs[0]]
     return []
 
+
+__all__ = ["EmbeddingService"]

@@ -11,17 +11,21 @@ from fastapi import Depends
 from app.agents.decision_agent import DecisionAgent
 from app.agents.fraud_agent import FraudAgent
 from app.agents.policy_agent import PolicyAgent
+from app.core.config import settings
 from app.core.dependencies import get_embedding_service, get_hitl_service, get_llm_service, get_vector_store
 from app.models.schemas import InferenceRequest, InferenceResponse
+from app.services.context_builder import ContextBuilder
+from app.services.dl_fraud_model import DeepFraudModel
 from app.services.embedding_service import EmbeddingService
 from app.services.hitl_service import HitlService
 from app.services.llm_service import LLMService
 from app.services.metrics import metrics
+from app.services.reranker import LightweightReranker
+from app.services.retriever import ClaimRetriever, RetrievalParams
 from app.services.vector_store import (
     SimilarHit,
     VectorStore,
     compute_calibrated_confidence,
-    format_similar_hits_for_context,
     majority_review_from_similar_hits,
 )
 
@@ -60,6 +64,34 @@ class InsurFlowOrchestrator:
         )
         self._policy_agent = PolicyAgent()
         self._decision_agent = DecisionAgent()
+        self._dl_fraud_model = DeepFraudModel(enabled=settings.dl_fraud_enabled)
+        self._rag_enabled = settings.rag_enabled
+        self._rag_top_k = max(1, min(25, int(settings.rag_top_k)))
+        self._retriever = ClaimRetriever(vector_store)
+        self._context_builder = ContextBuilder(max_tokens=settings.rag_context_max_tokens)
+        self._reranker = LightweightReranker() if settings.rag_rerank_enabled else None
+
+    async def _dl_fraud_score_safe(
+        self,
+        *,
+        claim_amount: float,
+        structured: dict[str, Any],
+        embedding: list[float] | None,
+    ) -> float | None:
+        if not settings.dl_fraud_enabled:
+            return None
+        try:
+            return await self._dl_fraud_model.predict_async(
+                claim_amount=claim_amount,
+                structured=structured,
+                embedding=embedding,
+            )
+        except Exception as exc:
+            logger.exception(
+                "dl_fraud_inference_failed",
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            return None
 
     async def run_inference(self, request: InferenceRequest) -> InferenceResponse:
         provider_override: str | None = None
@@ -103,23 +135,53 @@ class InsurFlowOrchestrator:
         similar_hits: list[SimilarHit] = []
         embedding_for_store: list[float] | None = None
         embedding_status = "fail"
+        rag_context_used = False
+        embedding_ms = 0.0
+        retrieval_ms = 0.0
 
         try:
+            t_emb = time.perf_counter()
             embedding_for_store = await self._embedding_service.embed(claim_description)
+            embedding_ms = (time.perf_counter() - t_emb) * 1000
             if not embedding_for_store:
                 embedding_status = "fail"
             else:
                 embedding_status = "success"
-                similar_hits = self._vector_store.query_similar_hits(
-                    query_embedding=embedding_for_store,
-                    exclude_claim_id=claim_id,
-                    n_results=10,
-                )
-                similar_context = format_similar_hits_for_context(similar_hits)
-                if similar_context:
-                    logger.info("similar_claims_context_ready", extra={"claim_id": claim_id})
+                if self._rag_enabled:
+                    t_ret = time.perf_counter()
+                    meta_equal = claim.get("rag_metadata_filter")
+                    if not isinstance(meta_equal, dict):
+                        meta_equal = None
+                    decision_filter = str(claim.get("rag_filter_decision") or "").strip() or None
+                    product_code = str(claim.get("product_code") or "").strip() or None
+
+                    hits = self._retriever.retrieve(
+                        RetrievalParams(
+                            claim_description=claim_description,
+                            query_embedding=embedding_for_store,
+                            exclude_claim_id=claim_id,
+                            top_k=self._rag_top_k,
+                            decision_equal=decision_filter,
+                            metadata_equal=meta_equal,
+                            product_code_equal=product_code,
+                        )
+                    )
+                    if self._reranker is not None:
+                        hits = self._reranker.rerank(hits, claim=claim, product_code=product_code)
+                    similar_hits = hits[: self._rag_top_k]
+                    similar_context = self._context_builder.build(similar_hits)
+                    retrieval_ms = (time.perf_counter() - t_ret) * 1000
+                    rag_context_used = bool(similar_context.strip())
+                    if similar_context:
+                        logger.info("similar_claims_context_ready", extra={"claim_id": claim_id})
+                else:
+                    similar_hits = []
+                    similar_context = ""
         except Exception as exc:
             embedding_status = "fail"
+            similar_hits = []
+            similar_context = ""
+            rag_context_used = False
             logger.exception(
                 "retrieval_context_failed",
                 extra={"claim_id": claim_id, "error": f"{type(exc).__name__}: {exc}"},
@@ -130,9 +192,51 @@ class InsurFlowOrchestrator:
         fraud_input = dict(claim)
         fraud_input["similar_claims_context"] = similar_context
 
-        fraud_task = self._fraud_agent.run(fraud_input)
-        policy_task = self._policy_agent.run(claim)
-        fraud_out, policy_out = await asyncio.gather(fraud_task, policy_task)
+        structured_for_dl = {
+            "policy_limit": claim.get("policy_limit"),
+            "product_code": claim.get("product_code"),
+            "currency": claim.get("currency"),
+            "description": claim.get("description"),
+            "incident_date": claim.get("incident_date"),
+            "policyholder_id": claim.get("policyholder_id"),
+        }
+        try:
+            dl_amount = float(claim.get("claim_amount") or 0.0)
+        except (TypeError, ValueError):
+            dl_amount = 0.0
+
+        async def _dl_timed() -> tuple[float | None, float]:
+            t0 = time.perf_counter()
+            prob = await self._dl_fraud_score_safe(
+                claim_amount=dl_amount,
+                structured=structured_for_dl,
+                embedding=embedding_for_store,
+            )
+            return prob, (time.perf_counter() - t0) * 1000
+
+        if settings.enable_parallel_execution:
+            fraud_out, policy_out, dl_pack = await asyncio.gather(
+                self._fraud_agent.run(fraud_input),
+                self._policy_agent.run(claim),
+                _dl_timed(),
+            )
+            dl_fraud_probability, dl_ms = dl_pack
+        else:
+            fraud_out = await self._fraud_agent.run(fraud_input)
+            policy_out = await self._policy_agent.run(claim)
+            dl_fraud_probability, dl_ms = await _dl_timed()
+
+        llm_ms = float(fraud_out.get("_llm_latency_ms") or 0.0)
+
+        if dl_fraud_probability is not None:
+            logger.info(
+                "dl_fraud_score",
+                extra={
+                    "claim_id": claim_id,
+                    "dl_fraud_probability": dl_fraud_probability,
+                    "dl_backend": self._dl_fraud_model.backend,
+                },
+            )
 
         fraud_llm_failed = bool(fraud_out.get("_llm_failed"))
 
@@ -151,12 +255,30 @@ class InsurFlowOrchestrator:
                     "explanation": "Fraud model unavailable or returned invalid output; escalate.",
                 }
         else:
+            fraud_for_decision = {
+                k: v
+                for k, v in fraud_out.items()
+                if k not in ("_llm_failed", "_llm_latency_ms")
+            }
             decision_in: dict[str, Any] = {
-                "fraud": fraud_out,
+                "fraud": fraud_for_decision,
                 "policy": policy_out,
                 "similar_majority_review": majority_review_from_similar_hits(similar_hits),
+                "fraud_probability_dl": dl_fraud_probability,
+                "dl_fusion_llm_weight": settings.dl_fraud_fusion_llm_weight,
+                "dl_fusion_dl_weight": settings.dl_fraud_fusion_dl_weight,
             }
             decision_out = await self._decision_agent.run(decision_in)
+            logger.info(
+                "decision_after_fusion",
+                extra={
+                    "claim_id": claim_id,
+                    "decision": decision_out.get("decision"),
+                    "fused_fraud_score": decision_out.get("fused_fraud_score"),
+                    "fraud_score_llm": decision_out.get("fraud_score_llm"),
+                    "fraud_probability_dl": decision_out.get("fraud_probability_dl"),
+                },
+            )
 
         base_confidence = float(decision_out.get("confidence_score") or 0.0)
         calibrated = compute_calibrated_confidence(
@@ -170,7 +292,9 @@ class InsurFlowOrchestrator:
             confidence=float(calibrated),
         )
 
-        fraud_for_client = {k: v for k, v in fraud_out.items() if k != "_llm_failed"}
+        fraud_for_client = {
+            k: v for k, v in fraud_out.items() if k not in ("_llm_failed", "_llm_latency_ms")
+        }
 
         # Single memory write: embedding + document + metadata (skip if embedding unusable).
         if embedding_status == "success" and embedding_for_store:
@@ -185,6 +309,7 @@ class InsurFlowOrchestrator:
                     metadata={
                         "claim_id": claim_id,
                         "fraud_score": float(fraud_out.get("fraud_score") or 0.0),
+                        "dl_fraud_score": float(dl_fraud_probability) if dl_fraud_probability is not None else 0.0,
                         "decision": str(decision_out.get("decision") or ""),
                         "confidence": float(decision_out.get("confidence_score") or 0.0),
                         "entities": fraud_out.get("entities") or {},
@@ -210,7 +335,19 @@ class InsurFlowOrchestrator:
 
         metrics.record_claim_processed(hitl_triggered=hitl.needs_hitl)
 
-        elapsed_ms = (time.perf_counter() - workflow_start) * 1000
+        total_ms = (time.perf_counter() - workflow_start) * 1000
+        logger.info(
+            "claim_pipeline_perf",
+            extra={
+                "claim_id": claim_id,
+                "embedding_time_ms": round(embedding_ms, 2),
+                "retrieval_time_ms": round(retrieval_ms, 2),
+                "llm_time_ms": round(llm_ms, 2),
+                "dl_time_ms": round(dl_ms, 2),
+                "total_time_ms": round(total_ms, 2),
+                "parallel_execution": settings.enable_parallel_execution,
+            },
+        )
         logger.info(
             "claim_triage_structured",
             extra={
@@ -221,12 +358,22 @@ class InsurFlowOrchestrator:
                 "hitl_needed": hitl.needs_hitl,
                 "embedding_status": embedding_status,
                 "retrieval_count": retrieval_count,
+                "rag_enabled": self._rag_enabled,
+                "rag_context_used": rag_context_used,
+                "dl_fraud_probability": dl_fraud_probability,
+                "fused_fraud_score": decision_out.get("fused_fraud_score"),
+                "embedding_time_ms": round(embedding_ms, 2),
+                "retrieval_time_ms": round(retrieval_ms, 2),
+                "llm_time_ms": round(llm_ms, 2),
+                "dl_time_ms": round(dl_ms, 2),
+                "total_time_ms": round(total_ms, 2),
             },
         )
         logger.info(
             "orchestrator_claim_complete",
             extra={
-                "duration_ms": round(elapsed_ms, 2),
+                "duration_ms": round(total_ms, 2),
+                "total_time_ms": round(total_ms, 2),
                 "decision": decision_out.get("decision"),
             },
         )
@@ -241,6 +388,11 @@ class InsurFlowOrchestrator:
                 "fraud": fraud_for_client,
                 "policy": policy_out,
                 "decision": decision_out,
+                "dl_fraud": {
+                    "enabled": settings.dl_fraud_enabled,
+                    "backend": self._dl_fraud_model.backend,
+                    "fraud_probability": dl_fraud_probability,
+                },
             },
         }
 

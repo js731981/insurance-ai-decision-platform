@@ -166,17 +166,21 @@ class VectorStore:
         query_embedding: list[float],
         exclude_claim_id: Optional[str] = None,
         n_results: int = 10,
+        where: Optional[dict[str, Any]] = None,
     ) -> list[SimilarHit]:
         """Retrieve similar claims with weighted ranking (review + decision coherence)."""
         _validate_embedding(query_embedding)
 
         n = max(1, min(25, n_results))
+        qkwargs: dict[str, Any] = {
+            "query_embeddings": [query_embedding],
+            "n_results": n,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where is not None:
+            qkwargs["where"] = where
         try:
-            res = self._collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n,
-                include=["documents", "metadatas", "distances"],
-            )
+            res = self._collection.query(**qkwargs)
         except Exception:
             logger.exception("vector_query_failed")
             return []
@@ -232,12 +236,17 @@ class VectorStore:
         query_embedding: list[float],
         exclude_claim_id: Optional[str] = None,
         n_results: int = 8,
+        where: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Return a short text block prioritising weighted similar claims."""
+        """Return a short text block prioritising weighted similar claims.
+
+        Uses the same retrieval path as :meth:`query_similar_hits` (vector query + weighting).
+        """
         hits = self.query_similar_hits(
             query_embedding=query_embedding,
             exclude_claim_id=exclude_claim_id,
             n_results=n_results,
+            where=where,
         )
         return format_similar_hits_for_context(hits)
 

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 from typing import Any, Dict, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx
 
 from app.services.llm.providers.base import LLMProvider, LLMProviderError
 
+logger = logging.getLogger(__name__)
+
 
 class OllamaProvider(LLMProvider):
-    """Ollama provider using the `/api/generate` endpoint (non-streaming)."""
+    """Ollama `/api/generate` using a shared async HTTP client (no per-request model reload on client side)."""
 
     def __init__(
         self,
@@ -21,6 +23,17 @@ class OllamaProvider(LLMProvider):
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
         self._provider_name = "ollama"
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=httpx.Timeout(timeout_s),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+
+    async def aclose(self) -> None:
+        try:
+            await self._client.aclose()
+        except Exception:  # noqa: BLE001
+            logger.exception("ollama_client_close_failed")
 
     async def complete(
         self,
@@ -35,22 +48,30 @@ class OllamaProvider(LLMProvider):
             "stream": False,
         }
         if generation_kwargs:
-            # Ollama supports many options; pass-through keeps this extensible.
             payload.update(generation_kwargs)
 
-        url = f"{self._base_url}/api/generate"
-        headers = {"Content-Type": "application/json"}
+        try:
+            resp = await self._client.post("/api/generate", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            body = ""
+            try:
+                body = exc.response.text[:2000]
+            except Exception:
+                body = str(exc)
+            raise LLMProviderError(
+                provider=self._provider_name,
+                message=f"Ollama HTTP error ({exc.response.status_code})",
+                status_code=exc.response.status_code,
+                response_body=body,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LLMProviderError(
+                provider=self._provider_name,
+                message=f"Ollama network error: {exc}",
+            ) from exc
 
-        data = await asyncio.to_thread(
-            _post_json,
-            url,
-            headers,
-            payload,
-            self._provider_name,
-            self._timeout_s,
-        )
-
-        # Ollama returns {"response": "...", "done": true, ...}
         response = data.get("response")
         if not isinstance(response, str):
             raise LLMProviderError(
@@ -59,36 +80,3 @@ class OllamaProvider(LLMProvider):
                 response_body=json.dumps(data)[:2000],
             )
         return response
-
-
-def _post_json(
-    url: str,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    provider_name: str,
-    timeout_s: float,
-) -> Dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    req = Request(url=url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(req, timeout=timeout_s) as resp:  # nosec B310 - controlled by provider usage
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw)
-    except HTTPError as e:
-        raw = ""
-        try:
-            raw = e.read().decode("utf-8")
-        except Exception:
-            raw = str(e)
-        raise LLMProviderError(
-            provider=provider_name,
-            message=f"Ollama HTTP error ({e.code})",
-            status_code=e.code,
-            response_body=raw[:2000],
-        ) from e
-    except URLError as e:
-        raise LLMProviderError(
-            provider=provider_name,
-            message=f"Ollama network error: {e.reason}",
-        ) from e
-

@@ -41,14 +41,17 @@ app.include_router(analytics_router)
 @app.on_event("startup")
 async def _startup() -> None:
     logger.info("Starting Insurance AI Decision Platform (micro-insurance)")
-    # Eager init: fail fast on Chroma misconfig and avoid first-request races.
-    from app.core.dependencies import get_vector_store
+    # Eager init: fail fast on misconfig and avoid first-request races on shared clients.
+    from app.core.dependencies import get_embedding_service, get_llm_service, get_vector_store
 
     get_vector_store()
+    get_llm_service()
+    get_embedding_service()
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    from app.core.dependencies import shutdown_vector_store
+    from app.core.dependencies import shutdown_llm_embedding_clients, shutdown_vector_store
 
+    await shutdown_llm_embedding_clients()
     shutdown_vector_store()
