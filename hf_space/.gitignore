@@ -1,9 +1,6 @@
 __pycache__/
 *.pyc
 .gradio/
+.git/
 .env
 
-assets/demo_images/
-*.jpg
-*.png
-*.jpeg
