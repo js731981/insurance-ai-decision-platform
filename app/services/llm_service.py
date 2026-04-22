@@ -172,3 +172,35 @@ class LLMService:
                 logger.warning("Model not available, falling back to safe decision")
             raise
 
+
+def generate_explanation(summary: str, rules: str | list[str] | None, rag: object) -> str:
+    """Optional, best-effort LLM explanation helper.
+
+    This is a post-decision add-on and MUST NOT affect the core decision.
+    Uses the lightweight `ollama` python package when available; otherwise returns a safe fallback.
+    """
+    prompt = f"""
+Explain the insurance decision clearly.
+
+Summary:
+{summary}
+
+Rules Triggered:
+{rules}
+
+Historical Context:
+{rag}
+""".strip()
+    try:
+        import ollama  # type: ignore
+
+        res = ollama.chat(
+            model=str(settings.llm_model or "phi3:mini"),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        msg = res.get("message") if isinstance(res, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        return str(content or "").strip() or "LLM returned an empty explanation."
+    except Exception:
+        return "LLM not available. Using rule-based explanation."
+

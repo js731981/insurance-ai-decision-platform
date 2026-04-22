@@ -1,5 +1,7 @@
-import gradio as gr
 import datetime
+
+import gradio as gr
+import numpy as np
 
 
 HISTORY = [
@@ -198,7 +200,18 @@ def narrative(score):
     return "Low risk, likely valid claim."
 
 
-def analyze(claim_id: str, desc: str, amount, policy):
+def _image_uploaded(image) -> bool:
+    if image is None:
+        return False
+    try:
+        if isinstance(image, np.ndarray) and image.size == 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def analyze_claim(claim_id: str, desc: str, amount, policy, image):
     try:
         amount_f = float(amount) if amount is not None else 0.0
     except (TypeError, ValueError):
@@ -209,15 +222,89 @@ def analyze(claim_id: str, desc: str, amount, policy):
     except (TypeError, ValueError):
         policy_f = 0.0
 
-    label, cnn_conf, severity = cnn_model(desc or "")
+    has_image = _image_uploaded(image)
+    if not has_image:
+        cnn_label = None
+        cnn_note = "📷 No image uploaded"
+        label, cnn_conf, severity = None, None, None
+        desc_l = (desc or "").lower()
+        severity = "HIGH" if "crack" in desc_l else "LOW"
+    else:
+        cnn_note = "✅ Image processed"
+        label, cnn_conf, severity = cnn_model(desc or "")
+        cnn_label = label
+
     decision, fraud_score = rule_engine(amount_f, policy_f, severity)
     similar = retrieve_similar(desc or "")
-    pipeline = pipeline_status()
+
+    rag_text = ""
+    approved = 0
+    rejected = 0
+    for s in similar:
+        rag_text += f"- {s['id']} → {s['decision']} (${s['amount']})\n"
+        if s.get("decision") == "APPROVED":
+            approved += 1
+        else:
+            rejected += 1
+
+    rag_summary_body = f"""
+* Similar claims found: {len(similar)}
+* Approved: {approved}
+* Rejected: {rejected}
+  """
+    rag_markdown = rag_summary_body + ("\n" + rag_text if rag_text else "")
+    rag_hits = bool(similar)
+
+    result = {
+        "decision": decision,
+        "fraud_score": fraud_score,
+        "severity": severity,
+        "cnn_label": cnn_label,
+        "rag_summary": rag_markdown.strip() if rag_hits else "",
+        "amount": amount_f,
+        "policy_limit": policy_f,
+        "llm_used": False,
+    }
+
+    pipeline = {
+        "CNN": "✔ Used" if result.get("cnn_label") else "✖ Not Used",
+        "Rules": "✔ Used",
+        "RAG": "✔ Used" if result.get("rag_summary") else "✖ Not Used",
+        "LLM": "✔ Used" if result.get("llm_used") else "✖ Not Used",
+    }
+
+    timeline = [
+        "✔ Claim Received",
+        "✔ RAG Retrieval" if result.get("rag_summary") else "✖ RAG Skipped",
+        "✔ CNN Analysis" if result.get("cnn_label") else "✖ CNN Skipped",
+        "✔ Rule Engine",
+        "✔ Decision Fusion",
+        f"🎯 Final: {result.get('decision')}",
+    ]
+
+    policy_lim = result.get("policy_limit") or 0
+    amt = result.get("amount") or 0
+    if policy_lim and policy_lim > 0:
+        ratio_s = f"{round(amt / policy_lim, 2)}"
+    else:
+        ratio_s = "N/A (no policy limit)"
+
+    fs = result.get("fraud_score")
+    fs_s = f"{float(fs):.2f}" if fs is not None else "—"
+
+    risk_md = f"""
+* **Fraud Score**: {fs_s}
+* **Severity**: {result.get("severity")}
+* **Claim Ratio**: {ratio_s}
+"""
+
+    timeline_md = "\n".join(f"* {row}" for row in timeline)
+    pipeline_md = "\n".join(f"* **{k}**: {v}" for k, v in pipeline.items())
 
     band = risk_band(fraud_score)
     pipeline_exp = pipeline_explanation(severity, amount_f)
     rules_exp = rule_explanation(severity, amount_f, policy_f)
-    confidence_md = confidence_breakdown(cnn_conf, fraud_score)
+    confidence_md = confidence_breakdown(cnn_conf if cnn_conf is not None else 0.0, fraud_score)
     cf = counterfactual(amount_f, policy_f)
 
     badge = decision_badge(decision)
@@ -234,27 +321,14 @@ def analyze(claim_id: str, desc: str, amount, policy):
 * Narrative: {note}
   """
 
+    label_disp = label if label is not None else "—"
+    conf_disp = cnn_conf if cnn_conf is not None else "—"
     signals = f"""
 
-* Damage Type: {label} ({cnn_conf})
+* Damage Type: {label_disp} ({conf_disp})
 * Claim Amount: {amount_f}
 * Policy Limit: {policy_f}
-  """
-
-    rag_text = ""
-    approved = 0
-    rejected = 0
-    for s in similar:
-        rag_text += f"- {s['id']} → {s['decision']} (${s['amount']})\n"
-        if s.get("decision") == "APPROVED":
-            approved += 1
-        else:
-            rejected += 1
-
-    rag_summary = f"""
-* Similar claims found: {len(similar)}
-* Approved: {approved}
-* Rejected: {rejected}
+* Image: {cnn_note}
   """
 
     final_reason = f"""
@@ -267,16 +341,20 @@ Decision '{decision}' is based on:
     HISTORY.append({"id": claim_id, "desc": desc, "amount": amount_f, "decision": decision})
     log_decision(claim_id, decision, fraud_score)
 
+    cnn_out = cnn_note if not has_image else f"{cnn_note} — {label} ({cnn_conf})"
+
     return (
         badge,
         f"{fraud_score:.2f}",
         severity,
-        f"{label} ({cnn_conf})",
+        cnn_out,
+        timeline_md,
+        pipeline_md,
+        risk_md,
         risk_html,
         summary,
         signals,
-        rag_summary + "\n" + rag_text,
-        pipeline,
+        rag_markdown,
         final_reason,
         pipeline_exp,
         rules_exp,
@@ -294,7 +372,7 @@ with gr.Blocks() as demo:
             desc = gr.Textbox(label="Description")
             amount = gr.Number(label="Claim Amount")
             policy = gr.Number(label="Policy Limit")
-            image = gr.Image(label="Upload Claim Image", type="filepath")
+            image = gr.Image(type="numpy", label="Upload Claim Image")
 
             with gr.Row():
                 btn = gr.Button("🚀 Analyze Claim")
@@ -306,6 +384,9 @@ with gr.Blocks() as demo:
             fraud = gr.Textbox(label="Fraud Score")
             severity = gr.Textbox(label="Severity")
             cnn = gr.Textbox(label="CNN Output")
+            timeline_output = gr.Markdown(label="🧭 Decision Timeline")
+            pipeline_output = gr.Markdown(label="⚙️ AI Pipeline")
+            heatmap_output = gr.Markdown(label="🔥 Risk Heatmap")
             risk_bar = gr.HTML(label="Risk Meter")
 
     with gr.Accordion("🧠 Decision Summary", open=True):
@@ -316,9 +397,6 @@ with gr.Blocks() as demo:
 
     with gr.Accordion("📊 RAG Summary"):
         rag = gr.Markdown()
-
-    with gr.Accordion("⚙️ AI Pipeline"):
-        pipeline = gr.Markdown()
 
     with gr.Accordion("⚖️ Final Justification"):
         final_reason = gr.Markdown()
@@ -336,27 +414,29 @@ with gr.Blocks() as demo:
         cf_out = gr.Markdown()
 
     def normal_case():
-        return "ID-001", "minor scratch", 200, 1000
+        return "ID-001", "minor scratch", 200, 1000, None
 
     def fraud_case():
-        return "ID-002", "no damage high claim", 900, 1000
+        return "ID-002", "no damage high claim", 900, 1000, None
 
-    normal_btn.click(normal_case, outputs=[claim_id, desc, amount, policy])
-    fraud_btn.click(fraud_case, outputs=[claim_id, desc, amount, policy])
+    normal_btn.click(normal_case, outputs=[claim_id, desc, amount, policy, image])
+    fraud_btn.click(fraud_case, outputs=[claim_id, desc, amount, policy, image])
 
     btn.click(
-        analyze,
-        inputs=[claim_id, desc, amount, policy],
+        analyze_claim,
+        inputs=[claim_id, desc, amount, policy, image],
         outputs=[
             decision,
             fraud,
             severity,
             cnn,
+            timeline_output,
+            pipeline_output,
+            heatmap_output,
             risk_bar,
             summary,
             signals,
             rag,
-            pipeline,
             final_reason,
             pipeline_exp_out,
             rules_out,

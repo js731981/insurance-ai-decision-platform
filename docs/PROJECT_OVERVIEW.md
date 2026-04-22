@@ -17,6 +17,7 @@
 9. **Investigator workflow** — Cases on stored claims: list/filter, **assign** (`NEW` → `ASSIGNED`), and status updates (`ASSIGNED` → `IN_PROGRESS` → `RESOLVED`).
 10. **Analytics** — Read-only aggregates: summary stats, heuristic anomaly-style alerts, fraud-score leaderboard.
 11. **Observability & UI** — Structured logging, in-process **metrics** (`GET /metrics`), and a **minimal dashboard** at **`/ui`**.
+12. **Post-decision analyze (2026-04-23)** — **`POST /analyze`** accepts a JSON **object** (passed through as a `dict` to the orchestrator—prefer the same fields as `ClaimRequest`), runs the **same** `InsurFlowOrchestrator` claim pipeline as `/claims`, then a **non-mutating enrichment layer**: step **trace**, conditional **RAG** over a **dedicated** Chroma collection (`claims_post_decision_sbert`, **sentence-transformers** / `all-MiniLM-L6-v2` when installed), reflection-driven **RAG retry** for low fraud scores, and a **best-effort LLM explanation** (`generate_explanation` via the `ollama` client, with a safe string fallback). Core **`decision` is unchanged** by this layer.
 
 ## Architecture (conceptual)
 
@@ -30,6 +31,8 @@ FastAPI (v0.1.0)
     │                          ├→ Optional DL fraud probability fusion (enabled via env)
     │                          └→ Optional image severity/signal fusion (enabled via env)
     └── store_claim (upsert when embedding succeeds)
+
+Post-decision (optional consumer): `POST /analyze` → `enhance_after_decision` → `post_decision_agent` (plan/reflect) + `rag_service` (SBERT collection) + `generate_explanation`
 ```
 
 **LLM execution** goes through **`LLMService` → `LLMRouter`** (timeouts, retries, optional fallbacks). Providers: **Ollama** (default), **OpenAI** and **OpenRouter** if API keys are set. **`POST /inference`** supports optional task hints (`cheap` → Ollama, `complex` → OpenAI when configured). Optional **USD cost** heuristics use `LLM_COST_USD_PER_1K_*` environment variables.
@@ -45,7 +48,7 @@ FastAPI (v0.1.0)
 | LLM / embeddings | **Ollama** (chat + embeddings); optional OpenAI / OpenRouter |
 | Vector store | **ChromaDB** (embedded, persistent directory) |
 
-Primary dependencies (see `requirements.txt`): `fastapi`, `uvicorn[standard]`, `httpx`, `python-dotenv`, `pydantic`, `chromadb`.
+Primary dependencies (see `requirements.txt`): `fastapi`, `uvicorn[standard]`, `httpx`, `python-dotenv`, `pydantic`, `chromadb`, **`sentence-transformers`** and **`ollama`** (post-decision RAG + explanation helpers; both degrade gracefully if unavailable).
 
 ## API surface (summary)
 
@@ -56,6 +59,7 @@ Primary dependencies (see `requirements.txt`): `fastapi`, `uvicorn[standard]`, `
 | Claim images | `GET /claims/{claim_id}/image-preview`, `GET /claims/{claim_id}/gradcam` |
 | Cases | `GET /cases`, `POST /cases/{claim_id}/assign`, `POST /cases/{claim_id}/status` |
 | Analytics | `GET /analytics/summary`, `/analytics/anomalies`, `/analytics/leaderboard` |
+| Post-decision | `POST /analyze` — same core triage as `/claims`, plus `trace`, `rag`, `llm` enrichment fields |
 | Inference | `GET /claim/samples`, `POST /inference` |
 
 **Claim input** is strict Pydantic (`ClaimRequest`, `extra="forbid"`). Empty `description` still gets a text embedding from a **JSON snapshot** of the claim for retrieval.
@@ -81,10 +85,11 @@ Primary dependencies (see `requirements.txt`): `fastapi`, `uvicorn[standard]`, `
 
 ## Repository layout (main)
 
-- `app/main.py` — App factory, routers, `/ui` static mount, startup log.
-- `app/agents/` — Orchestrator, fraud, policy, decision, base agent.
-- `app/api/routes/` — health, inference, claims, cases, analytics.
-- `app/services/` — LLM/router/providers, embeddings, vector store, HITL, metrics, analytics, retrieval/rerank/context building, samples.
+- `app/main.py` — App factory, routers, `/ui` static mount, eager startup (vector store + LLM warmup + embeddings).
+- `app/agents/` — Orchestrator, fraud, policy, decision, **post_decision** (planner/reflection hooks), base agent.
+- `app/api/routes/` — health, inference, claims, **analyze**, cases, analytics.
+- `app/api/claim_multipart.py` — Shared JSON / multipart claim parsing (covered by `tests/test_request_parsing.py`).
+- `app/services/` — LLM/router/providers, embeddings, vector store, HITL, metrics, analytics, retrieval/rerank/context building, samples, **post_decision_service**, **rag_service** (post-decision SBERT store), **case_service** / **feedback_service** (in-memory scaffolding for future workflow hooks).
 - `app/core/` — `Settings`, dependency wiring.
 - `app/web/` — Dashboard static assets.
 - `chroma_db/` (default) — Chroma persistence (`CHROMA_PERSIST_DIR`).

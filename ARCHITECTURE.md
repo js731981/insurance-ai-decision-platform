@@ -18,7 +18,7 @@ It augments existing systems **without disrupting core workflows**, acting as an
 
 Client / UI
 ↓
-FastAPI (API Layer)
+FastAPI (API Layer) — includes **`POST /analyze`** (core pipeline + post-decision enrichment; see below)
 ↓
 InsurFlow Orchestrator (Async Control Layer)
 ↓
@@ -72,11 +72,29 @@ Future decisions leverage stored knowledge
 
 ---
 
+## Post-decision layer (2026-04-23)
+
+**Purpose:** compatibility and UX for “enhanced” responses **without** changing core triage logic.
+
+**Flow:**
+
+1. Client calls **`POST /analyze`** with a claim-shaped JSON body.
+2. **`InsurFlowOrchestrator.process_claim`** runs unchanged (embed → RAG/fraud/policy/decision → HITL semantics → primary Chroma upsert).
+3. **`post_decision_service.enhance_after_decision`** merges the core JSON with:
+   - **`trace`** — ordered strings from `post_decision_agent.plan_steps` / `reflect` (e.g. core decision, RAG steps, optional RAG retry when fraud score is low).
+   - **`rag`** — up to *k* similar rows from a **separate** Chroma collection **`claims_post_decision_sbert`**, embedded with **`sentence-transformers`** (`all-MiniLM-L6-v2`) so dimensions never conflict with the main Ollama embedding index.
+   - **`llm`** — narrative text from **`generate_explanation`** in `app.services.llm_service` (uses the **`ollama`** Python client when available; otherwise a deterministic fallback string).
+4. Best-effort **`rag_service.store_claim`** upserts a minimal record into the SBERT collection for future post-decision retrieval.
+
+**Explicit non-goals:** this layer must **not** rewrite `decision`, `confidence_score`, or `agent_outputs` from the orchestrator.
+
+---
+
 ## Core Components
 
 ### 1. API Layer (FastAPI)
 - Handles incoming requests
-- Exposes endpoints for claims, review, and inference
+- Exposes endpoints for claims, review, **post-decision analyze**, and inference
 - Serves Swagger UI and minimal dashboard
 - Supports JSON and multipart claim submission for UI-friendly image uploads
 - Exposes image explainability endpoints for stored claims:
@@ -88,8 +106,9 @@ Future decisions leverage stored knowledge
 ### 2. Orchestrator
 - Central control layer
 - Executes agents asynchronously
-- Ensures **single atomic memory write**
+- Ensures **single atomic memory write** to the **primary** claims vector index
 - Applies HITL decision logic
+- **`POST /analyze`** delegates here first; post-decision storage is a **secondary** best-effort path in `rag_service`
 
 ---
 
@@ -131,6 +150,7 @@ Future decisions leverage stored knowledge
   - embeddings
   - structured metadata
 - Enables semantic search for similar claims
+- **Two logical indexes in MVP:** (1) primary **`claims`** collection — Ollama embeddings, orchestrator RAG + analytics; (2) optional **`claims_post_decision_sbert`** — SBERT embeddings, **post-decision** RAG only.
 
 Note:
 - Uses embedded mode (SQLite)
@@ -223,6 +243,10 @@ MVP → Production:
 - Basic logs → Observability stack (Prometheus, Grafana)
 
 ---
+
+## Application lifecycle
+
+- **Startup:** eager initialization of vector store, LLM service (**warmup** for Ollama when configured), and embedding client to reduce first-request latency and surface misconfiguration early.
 
 ## Observability
 

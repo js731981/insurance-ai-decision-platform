@@ -2,7 +2,7 @@ import base64
 import binascii
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class InferenceRequest(BaseModel):
@@ -33,6 +33,33 @@ ClaimDecision = Literal["APPROVED", "REJECTED", "INVESTIGATE"]
 DecisionSource = Literal["rule", "llm", "fallback"]
 
 
+class ClaimPipelineFlags(BaseModel):
+    """UI-friendly snapshot of which triage components contributed (interview / XAI)."""
+
+    cnn: bool = Field(default=False, description="CNN image path contributed a usable label/signal.")
+    rules: bool = Field(default=True, description="Policy / deterministic rules participated.")
+    rag: bool = Field(default=False, description="Vector retrieval returned at least one similar hit.")
+    llm: bool = Field(
+        default=False,
+        description="Fraud assessment produced a fraud_score (LLM call, rule short-circuit, or timeout fallback).",
+    )
+
+
+class DecisionTimelineStep(BaseModel):
+    """Single row in the UI decision trace (observability only)."""
+
+    step: str = Field(..., min_length=1, max_length=200)
+    status: str = Field(..., min_length=1, max_length=200)
+
+
+class RiskHeatmapView(BaseModel):
+    """Compact risk snapshot for dashboard heatmap (observability only)."""
+
+    fraud_score: float = Field(ge=0.0, le=1.0)
+    severity: str = Field(default="MEDIUM", max_length=32, description="LOW | MEDIUM | HIGH")
+    amount_ratio: float = Field(ge=0.0, description="claim_amount / policy_limit (uncapped; UI may clamp display).")
+
+
 class DecisionMetadata(BaseModel):
     """Structured attribution metadata for transparency in UI."""
 
@@ -61,7 +88,7 @@ class DecisionMetadata(BaseModel):
 class ClaimRequest(BaseModel):
     """Inbound micro-insurance claim.
 
-    Required fields are the three used for routing and policy checks; optional fields are
+    Required fields: ``claim_id``, ``description``, ``amount``, ``policy_limit``. Optional fields are
     forwarded to the fraud agent as additional context (``extra`` is forbidden on unknown keys).
     """
 
@@ -70,21 +97,22 @@ class ClaimRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "claim_id": "MIC-2026-00412",
-                "claim_amount": 75.5,
+                "description": "Dropped phone; screen cracked; repair quote from authorized shop.",
+                "amount": 75.5,
                 "policy_limit": 500.0,
                 "currency": "USD",
                 "product_code": "PHONE_CRACK",
                 "incident_date": "2026-03-28",
                 "policyholder_id": "ph_8k2m",
-                "description": "Dropped phone; screen cracked; repair quote from authorized shop.",
             }
         },
     )
 
     claim_id: str = Field(..., min_length=1, max_length=200, description="Stable id for this micro-claim.")
-    claim_amount: float = Field(
+    amount: float = Field(
         ...,
         ge=0,
+        validation_alias=AliasChoices("amount", "claim_amount"),
         description="Requested payout amount (same currency unit as policy_limit).",
     )
     policy_limit: float = Field(
@@ -112,10 +140,11 @@ class ClaimRequest(BaseModel):
         max_length=200,
         description="Internal id for the insured party.",
     )
-    description: Optional[str] = Field(
-        default=None,
+    description: str = Field(
+        ...,
+        min_length=1,
         max_length=5000,
-        description="Free-text narrative for fraud / context (optional).",
+        description="Free-text narrative for fraud / context.",
     )
     rag_filter_decision: Optional[ClaimDecision] = Field(
         default=None,
@@ -186,7 +215,27 @@ class ClaimProcessResponse(BaseModel):
     cnn_label: str = Field(default="unknown", description="CNN label (e.g. minor_crack).")
     cnn_confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="CNN confidence in [0,1].")
     cnn_severity: str = Field(default="unknown", description="CNN severity label (low/medium/high/unknown).")
+    image_used: bool = Field(
+        default=False,
+        description="True when the request included claim image bytes (multipart, JSON image_base64, or raw bytes).",
+    )
     agent_outputs: Dict[str, Any]
+    pipeline: ClaimPipelineFlags = Field(
+        default_factory=ClaimPipelineFlags,
+        description="Which pipeline stages contributed to this triage outcome.",
+    )
+    case_status: str = Field(
+        default="OPEN",
+        description="Triage lifecycle label for UI (OPEN | UNDER_REVIEW | APPROVED | REJECTED); not case-management status.",
+    )
+    timeline: list[DecisionTimelineStep] = Field(
+        default_factory=list,
+        description="Ordered pipeline trace for explainability (UI).",
+    )
+    risk: RiskHeatmapView = Field(
+        default_factory=lambda: RiskHeatmapView(fraud_score=0.0, severity="MEDIUM", amount_ratio=0.0),
+        description="Fraud + severity + payout ratio snapshot for UI heatmap.",
+    )
 
 
 ReviewAction = Literal["APPROVED", "REJECTED"]
@@ -271,6 +320,14 @@ class ClaimListItem(BaseModel):
     cnn_label: str = Field(default="", description="CNN label (e.g. minor_crack) when available.")
     cnn_confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="CNN confidence in [0,1].")
     cnn_severity: str = Field(default="", description="CNN severity label when available (low/medium/high).")
+    pipeline: Optional[ClaimPipelineFlags] = Field(
+        default=None,
+        description="Pipeline contribution flags when stored or derivable from claim metadata.",
+    )
+    case_status: str = Field(
+        default="OPEN",
+        description="Triage lifecycle for UI (OPEN | UNDER_REVIEW | APPROVED | REJECTED); distinct from /cases workflow status.",
+    )
 
 
 class ClaimImagePreviewResponse(BaseModel):

@@ -29,6 +29,7 @@ Key docs:
 - Supports **multimodal claim triage**: optional **image analysis** signals can be provided via JSON (`image_base64`) or multipart upload (`file`/`image`).
 - Optional **CNN damage classifier** (MobileNetV2 + fine-tuned weights) can be enabled for 3-class screen damage: `no_damage`, `minor_crack`, `major_crack`. If the CNN stack/weights are unavailable, the pipeline safely falls back to heuristic image signals.
 - Provides **visual explainability** for the CNN path via a **Grad-CAM overlay** endpoint (PNG).
+- Exposes **`POST /analyze`** (2026-04-23): same core triage as **`POST /claims`**, then **post-decision enrichment** only—`trace`, optional **SBERT** similar-claim hits in a **separate** Chroma collection (`claims_post_decision_sbert`), and a **best-effort narrative explanation** (does **not** change `APPROVED` / `REJECTED` / `INVESTIGATE`).
 
 ## Architecture
 
@@ -91,14 +92,17 @@ Memory Layer (Atomic Write)
 | **PolicyAgent** | Validates `policy_limit`, `claim_amount`, and amount ≤ limit. |
 | **DecisionAgent** | Combines fraud + policy into final triage outcome and `confidence_score`. |
 
+**Post-decision (not a separate triage agent):** `post_decision_agent` supplies lightweight **plan** / **reflect** hooks; `post_decision_service.enhance_after_decision` orchestrates optional RAG + explanation after the orchestrator returns.
+
 ## Tech stack
 
 - Python 3.10+, **FastAPI**, **Pydantic v2**, **httpx**, **python-dotenv**
 - **Pillow** + **numpy** for image decoding and lightweight vision heuristics
 - Optional **torch** + **torchvision** for CNN classification + Grad-CAM
 - **python-multipart** for multipart/form-data claim uploads (UI-friendly)
-- **Ollama** — chat completions (`/api/generate`) and embeddings (`/api/embeddings`)
+- **Ollama** — chat completions (`/api/generate`) and embeddings (`/api/embeddings`); optional **`ollama`** Python package used only for **`generate_explanation`** in the post-decision layer
 - **ChromaDB** — persistent local vector store
+- **`sentence-transformers`** (optional) — local embeddings for the **post-decision** Chroma collection only (`all-MiniLM-L6-v2`); if missing, post-decision RAG store/query steps are skipped safely
 
 ## Getting started
 
@@ -166,6 +170,8 @@ uvicorn app.main:app --reload
 - **Metrics:** `GET /metrics` — process-local counters plus `vector_store_claim_documents` from Chroma; includes `metrics_scope` explaining reset-on-restart behavior
 - **Dashboard:** [http://localhost:8000/ui](http://localhost:8000/ui) — claim list, **case** assign/status, and **analytics** (summary, anomalies, leaderboard)
 
+**Startup (eager init):** on launch, the app initializes the **vector store**, **LLM service** (including best-effort **Ollama warmup** and model-list validation with tag/base-name compatibility), and the **embedding** client so the first claim request avoids cold-start races.
+
 ## API overview
 
 | Method | Path | Description |
@@ -174,6 +180,7 @@ uvicorn app.main:app --reload
 | `GET` | `/health` | Liveness |
 | `GET` | `/metrics` | Snapshot: `total_claims_processed`, `hitl_triggered_count`, `reviewed_claims_count` (in-memory, reset when the process restarts), `metrics_scope`, and `vector_store_claim_documents` from Chroma. |
 | `POST` | `/claims` | Process a claim (JSON or multipart/form-data) |
+| `POST` | `/analyze` | Run the **same** claim pipeline as `/claims`, then append post-decision fields: `trace`, `rag`, `llm` (decision unchanged) |
 | `GET` | `/claims` | List stored claims from Chroma (MVP: up to **200** rows, fixed offset **0**) |
 | `GET` | `/claims/{claim_id}/image-preview` | Return stored base64 preview for the claim image (if present) |
 | `GET` | `/claims/{claim_id}/gradcam` | Return a Grad-CAM heatmap overlay PNG for the stored claim image (503 if CNN/weights unavailable) |
@@ -190,7 +197,8 @@ uvicorn app.main:app --reload
 
 ### Process a claim
 
-`POST /claims` or `POST /claim` — body: `ClaimRequest` (`claim_id`, `claim_amount`, `policy_limit`, plus optional fields such as `description`, `currency`, `product_code`, `incident_date`, `policyholder_id`). **Unknown top-level JSON keys are rejected** (`extra="forbid"`).
+- **`POST /claims`** and **`POST /claim`** — body must validate as **`ClaimRequest`** (`claim_id`, `claim_amount`, `policy_limit`, plus optional fields such as `description`, `currency`, `product_code`, `incident_date`, `policyholder_id`). **Unknown top-level JSON keys are rejected** (`extra="forbid"`).
+- **`POST /analyze`** — JSON object with the **same claim fields** as `ClaimRequest` (the orchestrator accepts a **`dict`**; prefer the same shape as `/claims` and avoid extra keys). After the core response is built, the API adds **`trace`**, **`rag`** (similar metadatas from the post-decision SBERT collection when available), and **`llm`** (narrative explanation or fallback text). The triage **`decision`** and **`agent_outputs`** from the core pipeline are **not overridden**.
 
 If `description` is empty, the orchestrator embeds a **JSON snapshot of the claim** for retrieval so similar-case context still has text to work with.
 
@@ -208,6 +216,7 @@ Response highlights:
 - `calibrated_confidence` — adjusted using similar claims with human `review_status`
 - `hitl_needed` — whether manual review is recommended
 - `agent_outputs` — `fraud`, `policy`, `decision` details
+- **`POST /analyze` only:** `trace`, `rag`, `llm` (see above)
 
 ### Human review
 
@@ -256,10 +265,15 @@ Read-only endpoints over all paginated claim rows in the vector store. OpenAPI: 
 - `app/agents/` — orchestrator, fraud, policy, decision, base agent
 - `app/api/routes/health.py` — `/`, `/health`, `/metrics`
 - `app/api/routes/claims.py` — `POST/GET /claims`, `POST /claims/{claim_id}/review`
+- `app/api/routes/analyze.py` — `POST /analyze` (core pipeline + post-decision enrichment)
+- `app/api/claim_multipart.py` — multipart / JSON claim parsing helpers
 - `app/api/routes/cases.py` — `GET /cases`, `POST /cases/{claim_id}/assign`, `POST /cases/{claim_id}/status`
 - `app/api/routes/analytics.py` — `GET /analytics/summary`, `/analytics/anomalies`, `/analytics/leaderboard`
 - `app/api/routes/inference.py` — `POST /claim`, `GET /claim/samples`, `POST /inference`
-- `app/services/` — `llm_service`, `llm/router` + providers, `embedding_service`, `vector_store`, `hitl_service`, `metrics`, `claim_samples_service`, `analytics`
+- `app/services/` — `llm_service` (incl. `generate_explanation`), `llm/router` + providers, `embedding_service`, `vector_store`, `hitl_service`, `metrics`, `claim_samples_service`, `analytics`, `post_decision_service`, `rag_service`, `case_service`, `feedback_service`
+- `app/agents/post_decision_agent.py` — post-decision plan / reflect hooks
+- `tests/test_request_parsing.py` — unit tests for `parse_claim_http_request`
+- `hf_space/` — optional **Hugging Face Spaces** Gradio demo (`app.py`, UI components) aligned with claim + image analysis concepts
 - `app/core/` — `config` (`Settings`), `dependencies` (service factories)
 - `app/web/` — static dashboard (`index.html`, `app.js`)
 - `chroma_db/` (default) — persistent Chroma data; path set by `CHROMA_PERSIST_DIR`

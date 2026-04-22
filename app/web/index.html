@@ -69,7 +69,7 @@
                 </div>
                 <div class="form-field">
                   <label for="fieldAmount">Claim amount</label>
-                  <input id="fieldAmount" name="claim_amount" type="number" required min="0" step="0.01" placeholder="0.00" />
+                  <input id="fieldAmount" name="amount" type="number" required min="0" step="0.01" placeholder="0.00" />
                 </div>
                 <div class="form-field">
                   <label for="fieldLimit">Policy limit</label>
@@ -157,6 +157,28 @@
                 </span>
               </div>
 
+              <div id="pipeline" class="xai-panels" aria-live="polite"></div>
+              <div id="caseStatus" class="xai-panels" aria-live="polite"></div>
+              <div id="timeline" class="xai-panels" aria-live="polite"></div>
+              <div id="heatmap" class="xai-panels" aria-live="polite"></div>
+
+              <section class="what-if" aria-label="Counterfactual scenarios">
+                <h3 class="what-if__title">What-if scenarios</h3>
+                <div class="what-if__item">
+                  <p class="what-if__question">What if claim amount was higher?</p>
+                  <ul class="what-if__out">
+                    <li><span class="what-if__k">New decision:</span> REJECT</li>
+                    <li><span class="what-if__k">Reason:</span> exceeds threshold</li>
+                  </ul>
+                </div>
+                <div class="what-if__item">
+                  <p class="what-if__question">What if severity was LOW?</p>
+                  <ul class="what-if__out">
+                    <li><span class="what-if__k">Decision:</span> APPROVE</li>
+                  </ul>
+                </div>
+              </section>
+
               <section class="ai-analysis" aria-label="AI analysis">
                 <div class="ai-analysis__head">
                   <div class="ai-analysis__title">
@@ -165,10 +187,7 @@
                   </div>
                   <span id="aiAnalysisBadge" class="ai-badge" hidden></span>
                 </div>
-                <div id="aiAnalysisLoading" class="ai-analysis__loading muted" hidden>
-                  <span class="spinner" aria-hidden="true"></span>
-                  <span>Analyzing image with AI…</span>
-                </div>
+                <div id="imageStatus" class="ai-analysis__image-status muted" aria-live="polite"></div>
                 <div id="aiAnalysisError" class="ai-analysis__error" hidden></div>
                 <div id="aiPipelineSummary" class="ai-pipeline-summary muted"></div>
                 <div id="aiPipelineChecklist" class="ai-pipeline-checklist" aria-label="AI pipeline components"></div>
@@ -193,6 +212,27 @@
                     <dt>cnn_severity</dt>
                     <dd id="aiCnnSeverity">—</dd>
                   </div>
+                </div>
+                <div class="confidence-breakdown" aria-label="Confidence breakdown">
+                  <p class="confidence-breakdown__title">Confidence Breakdown</p>
+                  <ul class="confidence-breakdown__list">
+                    <li>
+                      <span class="confidence-breakdown__label">CNN weight</span>
+                      <span class="confidence-breakdown__pct">40%</span>
+                    </li>
+                    <li>
+                      <span class="confidence-breakdown__label">Rules weight</span>
+                      <span class="confidence-breakdown__pct">30%</span>
+                    </li>
+                    <li>
+                      <span class="confidence-breakdown__label">RAG influence</span>
+                      <span class="confidence-breakdown__pct">20%</span>
+                    </li>
+                    <li>
+                      <span class="confidence-breakdown__label">LLM reasoning</span>
+                      <span class="confidence-breakdown__pct">10%</span>
+                    </li>
+                  </ul>
                 </div>
                 <div class="ai-analysis__actions">
                   <button type="button" class="btn btn--secondary btn--sm" id="viewAiEvidenceBtn" disabled>

@@ -1,7 +1,7 @@
 [
   {
     "claim_id": "MIC-APPROVE-0001",
-    "claim_amount": 75.5,
+    "amount": 75.5,
     "policy_limit": 100.0,
     "currency": "USD",
     "product_code": "PHONE_CRACK",
@@ -11,7 +11,7 @@
   },
   {
     "claim_id": "MIC-REJECT-0002",
-    "claim_amount": 250.0,
+    "amount": 250.0,
     "policy_limit": 100.0,
     "currency": "USD",
     "product_code": "PHONE_CRACK",
@@ -21,7 +21,7 @@
   },
   {
     "claim_id": "MIC-INVESTIGATE-0003",
-    "claim_amount": 90.0,
+    "amount": 90.0,
     "policy_limit": 100.0,
     "currency": "USD",
     "product_code": "PHONE_CRACK",

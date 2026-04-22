@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -13,6 +14,7 @@ from app.core.dependencies import get_vector_store
 from app.models.schemas import (
     ClaimImagePreviewResponse,
     ClaimListItem,
+    ClaimPipelineFlags,
     ClaimProcessResponse,
     ClaimReviewRequest,
     DecisionMetadata,
@@ -25,12 +27,63 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["claims"])
 
 
+def _triage_case_status_from_meta(meta: dict[str, Any], *, decision: str | None, review_status: str | None) -> str:
+    rs = (review_status or str(meta.get("review_status") or meta.get("reviewed_action") or "")).strip().upper()
+    if rs in ("APPROVED", "REJECTED"):
+        return rs
+    stored = str(meta.get("claim_flow_status") or "").strip().upper()
+    if stored in ("OPEN", "UNDER_REVIEW", "APPROVED", "REJECTED"):
+        return stored
+    d = str(decision or meta.get("decision") or "").strip().upper()
+    if d == "INVESTIGATE":
+        return "UNDER_REVIEW"
+    if d in ("APPROVED", "REJECTED"):
+        return d
+    return "OPEN"
+
+
+def _pipeline_flags_from_meta(
+    meta: dict[str, Any],
+    *,
+    cnn_used: bool,
+    llm_used: bool,
+    decision_source: str | None,
+) -> ClaimPipelineFlags:
+    pj = meta.get("pipeline_flags_json")
+    if isinstance(pj, str) and pj.strip():
+        try:
+            raw = json.loads(pj)
+            if isinstance(raw, dict):
+                return ClaimPipelineFlags.model_validate(raw)
+        except Exception:
+            pass
+    try:
+        rag_hits = int(str(meta.get("rag_hit_count") or "0") or "0")
+    except (TypeError, ValueError):
+        rag_hits = 0
+    ds = str(decision_source or "").strip().lower()
+    try:
+        float(meta.get("fraud_score"))
+        fraud_score_present = True
+    except (TypeError, ValueError):
+        fraud_score_present = False
+    return ClaimPipelineFlags(
+        cnn=bool(cnn_used),
+        rules=True,
+        rag=rag_hits > 0,
+        llm=bool(fraud_score_present or (llm_used and ds == "llm")),
+    )
+
+
 @router.post("/claims", response_model=ClaimProcessResponse)
 async def create_claim(
     request: Request,
     orchestrator: InsurFlowOrchestrator = Depends(get_insurflow_orchestrator),
 ) -> ClaimProcessResponse:
     payload = await parse_claim_http_request(request)
+    print("Incoming request:", payload)
+    if not str(payload.get("claim_id") or "").strip():
+        raise HTTPException(status_code=400, detail="claim_id missing")
     result = await orchestrator.process_claim(payload)
     return ClaimProcessResponse.model_validate(result)
 
@@ -79,6 +132,8 @@ async def list_claims(
                 pipeline_obj = DecisionMetadata.model_validate_json(pj)
             except Exception:
                 pipeline_obj = None
+        triage_case_status = _triage_case_status_from_meta(meta, decision=str(meta.get("decision") or ""), review_status=rs)
+        pipe_flags = _pipeline_flags_from_meta(meta, cnn_used=cnn_used, llm_used=llm_used, decision_source=ds)
         out.append(
             ClaimListItem(
                 claim_id=str(row.get("claim_id") or ""),
@@ -105,6 +160,8 @@ async def list_claims(
                 cnn_label=cnn_label,
                 cnn_confidence=cnn_confidence,
                 cnn_severity=cnn_severity,
+                pipeline=pipe_flags,
+                case_status=triage_case_status,
             )
         )
     return out
@@ -213,6 +270,7 @@ async def review_claim(
                 "hitl_needed": False,
                 "hitl_reason": "",
                 "updated_at": now,
+                "claim_flow_status": str(action),
             }
         )
         vector_store.store_claim(

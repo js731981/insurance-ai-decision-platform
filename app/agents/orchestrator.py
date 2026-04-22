@@ -267,7 +267,7 @@ class InsurFlowOrchestrator:
             "policyholder_id": claim_work.get("policyholder_id"),
         }
         try:
-            dl_amount = float(claim_work.get("claim_amount") or 0.0)
+            dl_amount = float(claim_work.get("claim_amount") or claim_work.get("amount") or 0.0)
         except (TypeError, ValueError):
             dl_amount = 0.0
 
@@ -454,7 +454,7 @@ class InsurFlowOrchestrator:
         # Only include similar-claims context for complex cases to keep prompt payload small.
         # FraudAgent will still ignore it unless include_similar_claims_context is true.
         try:
-            claim_amount = float(claim_work.get("claim_amount") or 0.0)
+            claim_amount = float(claim_work.get("claim_amount") or claim_work.get("amount") or 0.0)
         except (TypeError, ValueError):
             claim_amount = 0.0
         has_image = bool(image_features.get("present"))
@@ -873,6 +873,16 @@ class InsurFlowOrchestrator:
         fraud_for_client = {
             k: v for k, v in fraud_out.items() if k not in ("_llm_failed", "_llm_latency_ms")
         }
+        expl_fc = fraud_for_client.get("explanation")
+        if "reasons" not in fraud_for_client:
+            if isinstance(expl_fc, dict):
+                kf_fc = expl_fc.get("key_factors")
+                if isinstance(kf_fc, list):
+                    fraud_for_client["reasons"] = [str(x) for x in kf_fc if str(x).strip()]
+                else:
+                    fraud_for_client["reasons"] = []
+            else:
+                fraud_for_client["reasons"] = []
 
         # ---- Attribution metadata for UI transparency ----
         img_signals = None
@@ -911,8 +921,8 @@ class InsurFlowOrchestrator:
             cnn_severity_raw = str(image_features.get("severity") or "").strip().lower()
         cnn_severity = cnn_severity_raw if cnn_severity_raw in ("low", "medium", "high") else "unknown"
 
-        # Orchestrator rule: CNN is "used" iff it produced a non-unknown label.
-        cnn_used = bool(bool(image_features.get("present")) and settings.enable_image_analysis and cnn_label != "unknown")
+        # CNN path ran and returned image analysis features (includes CNN-low-confidence heuristic fallback).
+        cnn_used = bool(image_feats_raw is not None)
 
         rules_used = True  # policy + deterministic logic always contribute to final decision.
 
@@ -953,6 +963,24 @@ class InsurFlowOrchestrator:
 
         # UI contract: "fallback_used" means LLM was not used (rule path) OR LLM failed (fallback path).
         fallback_used = str(decision_source).lower() in ("rule", "fallback")
+
+        decision_u = str(decision_out.get("decision") or "").strip().upper()
+        case_status_flow = (
+            "UNDER_REVIEW"
+            if decision_u == "INVESTIGATE"
+            else decision_u
+            if decision_u in ("APPROVED", "REJECTED")
+            else "OPEN"
+        )
+        cnn_result = image_feats_raw
+        similar_claims = similar_hits
+        fraud_result = fraud_out
+        pipeline_flags = {
+            "cnn": cnn_result is not None,
+            "rules": True,
+            "rag": bool(similar_claims and len(similar_claims) > 0),
+            "llm": fraud_result is not None and fraud_result.get("fraud_score") is not None,
+        }
 
         # Single memory write: embedding + document + metadata (skip if embedding unusable).
         if embedding_status == "success" and embedding_for_store:
@@ -995,6 +1023,9 @@ class InsurFlowOrchestrator:
                         "decision_source": decision_source,
                         "contributors": ",".join(contributors),
                         "pipeline_json": decision_metadata.model_dump_json(exclude_none=True),
+                        "rag_hit_count": str(int(retrieval_count)),
+                        "claim_flow_status": case_status_flow,
+                        "pipeline_flags_json": json.dumps(pipeline_flags, ensure_ascii=False),
                     },
                 )
                 logger.info("claim_stored", extra={"claim_id": claim_id})
@@ -1056,8 +1087,45 @@ class InsurFlowOrchestrator:
             },
         )
 
+        # Observability-only: step trace + risk snapshot for UI (does not affect decisions).
+        rag_data = bool(similar_hits and len(similar_hits) > 0)
+        fraud_assessment_done = bool(fraud_out is not None and fraud_out.get("fraud_score") is not None)
+        timeline: list[dict[str, str]] = []
+        timeline.append({"step": "Claim Received", "status": "done"})
+        timeline.append({"step": "RAG Retrieval", "status": "done" if rag_data else "skipped"})
+        timeline.append({"step": "CNN Analysis", "status": "done" if image_feats_raw is not None else "skipped"})
+        timeline.append({"step": "Fraud Agent (LLM)", "status": "done" if fraud_assessment_done else "skipped"})
+        timeline.append({"step": "Rule Engine", "status": "done"})
+        timeline.append({"step": "Decision Fusion", "status": "done"})
+        timeline.append({"step": "Final Decision", "status": str(decision_out.get("decision") or "").strip().upper()})
+
+        fused_for_risk = decision_out.get("fused_fraud_score")
+        try:
+            fraud_score_risk = float(fused_for_risk) if fused_for_risk is not None else float(fraud_out.get("fraud_score") or 0.0)
+        except (TypeError, ValueError):
+            fraud_score_risk = float(fraud_out.get("fraud_score") or 0.0)
+        fraud_score_risk = min(1.0, max(0.0, fraud_score_risk))
+
+        sev_raw = str(image_severity or cnn_severity or "").strip().lower()
+        if sev_raw == "high":
+            severity_risk = "HIGH"
+        elif sev_raw == "medium":
+            severity_risk = "MEDIUM"
+        elif sev_raw == "low":
+            severity_risk = "LOW"
+        else:
+            severity_risk = "MEDIUM"
+
+        if policy_limit > 0:
+            amount_ratio_risk = min(10.0, max(0.0, float(claim_amount) / float(policy_limit)))
+        else:
+            amount_ratio_risk = 1.0 if float(claim_amount) > 0 else 0.0
+
+        print("PIPELINE FLAGS:", pipeline_flags)
+
         return {
             "claim_id": claim_id,
+            "image_used": bool(image_bytes),
             "decision": decision_out["decision"],
             "confidence_score": decision_out["confidence_score"],
             "calibrated_confidence": calibrated,
@@ -1073,6 +1141,8 @@ class InsurFlowOrchestrator:
             "cnn_label": cnn_label,
             "cnn_confidence": float(cnn_confidence),
             "cnn_severity": cnn_severity,
+            "pipeline": pipeline_flags,
+            "case_status": case_status_flow,
             "agent_outputs": {
                 "fraud": fraud_for_client,
                 "policy": policy_out,
@@ -1090,6 +1160,18 @@ class InsurFlowOrchestrator:
                     "severity_score_used": image_severity_score_for_fusion,
                     "fusion_weight": settings.image_fusion_weight,
                 },
+                "rag": {
+                    "enabled": bool(self._rag_enabled),
+                    "similar_claims_found": int(retrieval_count),
+                    "context_in_prompt": bool(rag_context_used),
+                    "retrieval_ms": round(float(retrieval_ms), 2),
+                },
+            },
+            "timeline": timeline,
+            "risk": {
+                "fraud_score": fraud_score_risk,
+                "severity": severity_risk,
+                "amount_ratio": amount_ratio_risk,
             },
         }
 

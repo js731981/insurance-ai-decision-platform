@@ -14,6 +14,15 @@ _MAX_IMAGE_BYTES = 12 * 1024 * 1024
 _MAX_CLAIM_JSON_BYTES = 256 * 1024
 
 
+def _prepare_claim_payload(base: dict[str, Any]) -> dict[str, Any]:
+    """Canonical request uses ``amount``; orchestrator/policy still read ``claim_amount``."""
+    d = dict(base)
+    amt = d.get("amount")
+    if amt is not None and d.get("claim_amount") is None:
+        d["claim_amount"] = float(amt)
+    return d
+
+
 def _safe_json_loads(raw: str) -> dict[str, Any]:
     try:
         obj = json.loads(raw)
@@ -38,8 +47,8 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
     Multipart supports:
 
     * ``claim`` (JSON string) + optional file field ``image`` (legacy), or
-    * Flat fields ``claim_id``, ``claim_amount``, ``policy_limit``, optional ``description``, and optional
-      file field ``file`` or ``image`` (dashboard / simple clients).
+    * Flat fields ``claim_id``, ``amount`` (or legacy ``claim_amount``), ``policy_limit``, ``description``,
+      and optional file field ``file`` or ``image`` (dashboard / simple clients).
     """
     ct = request.headers.get("content-type") or ""
     if "multipart/form-data" in ct.lower():
@@ -52,24 +61,27 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
                     status_code=422,
                     detail="Multipart must include either field 'claim' (JSON string) or field 'claim_id' with amounts.",
                 )
-            amt_raw = form.get("claim_amount")
+            amt_raw = form.get("amount")
+            if amt_raw is None:
+                amt_raw = form.get("claim_amount")
             lim_raw = form.get("policy_limit")
             try:
-                claim_amount = float(amt_raw)  # type: ignore[arg-type]
+                amount = float(amt_raw)  # type: ignore[arg-type]
                 policy_limit = float(lim_raw)  # type: ignore[arg-type]
             except (TypeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=422,
-                    detail="claim_amount and policy_limit must be valid numbers.",
+                    detail="amount (or claim_amount) and policy_limit must be valid numbers.",
                 ) from exc
             desc = _scalar_str(form.get("description"))
             payload = {
                 "claim_id": cid,
-                "claim_amount": claim_amount,
+                "amount": amount,
                 "policy_limit": policy_limit,
-                "description": desc or None,
+                "description": desc,
             }
-            ClaimRequest.model_validate(payload)
+            payload = ClaimRequest.model_validate(payload).model_dump(exclude_none=True)
+            payload = _prepare_claim_payload(payload)
         else:
             if not isinstance(claim_raw, str):
                 raise HTTPException(status_code=422, detail="Multipart field 'claim' must be a string of JSON")
@@ -77,7 +89,8 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
             if len(raw.encode("utf-8")) > _MAX_CLAIM_JSON_BYTES:
                 raise HTTPException(status_code=413, detail="claim JSON too large")
             payload = _safe_json_loads(raw)
-            ClaimRequest.model_validate(payload)
+            payload = ClaimRequest.model_validate(payload).model_dump(exclude_none=True)
+            payload = _prepare_claim_payload(payload)
 
         img = form.get("file")
         if img is None:
@@ -104,7 +117,7 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
                     "multipart_claim_parsed",
                     extra={"has_image": False, "empty_upload": True, "filename": img.filename},
                 )
-                return payload
+                return _prepare_claim_payload(payload)
             if len(data) > _MAX_IMAGE_BYTES:
                 raise HTTPException(status_code=413, detail="Image file too large")
             payload = dict(payload)
@@ -115,7 +128,7 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
             )
         else:
             logger.info("multipart_claim_parsed", extra={"has_image": False})
-        return payload
+        return _prepare_claim_payload(payload)
 
     try:
         body = await request.json()
@@ -124,7 +137,7 @@ async def parse_claim_http_request(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="JSON body must be an object")
     req = ClaimRequest.model_validate(body)
-    return req.model_dump(exclude_none=True)
+    return _prepare_claim_payload(req.model_dump(exclude_none=True))
 
 
 __all__ = ["parse_claim_http_request"]

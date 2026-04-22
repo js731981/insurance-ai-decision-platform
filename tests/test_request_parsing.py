@@ -20,13 +20,13 @@ from app.api.claim_multipart import parse_claim_http_request
 def _minimal_claim_dict(
     *,
     claim_id: str = "MIC-TEST-001",
-    claim_amount: float = 75.5,
+    amount: float = 75.5,
     policy_limit: float = 500.0,
     description: str = "Synthetic claim for tests.",
 ) -> dict:
     return {
         "claim_id": claim_id,
-        "claim_amount": claim_amount,
+        "amount": amount,
         "policy_limit": policy_limit,
         "description": description,
     }
@@ -59,7 +59,7 @@ def test_multipart_valid_with_image_extracts_fields():
 
     claim = _minimal_claim_dict(
         claim_id="C-42",
-        claim_amount=99.0,
+        amount=99.0,
         description="Screen damage",
     )
 
@@ -72,6 +72,7 @@ def test_multipart_valid_with_image_extracts_fields():
 
     payload = _run(parse_claim_http_request(_multipart_request(form_get)))
     assert payload["claim_id"] == "C-42"
+    assert payload["amount"] == 99.0
     assert payload["claim_amount"] == 99.0
     assert payload["description"] == "Screen damage"
     assert payload["policy_limit"] == 500.0
@@ -154,7 +155,7 @@ def test_multipart_image_field_wrong_type():
     assert "file" in (ei.value.detail or "").lower()
 
 
-def test_multipart_empty_image_upload():
+def test_multipart_empty_image_upload_treated_as_no_image():
     claim = _minimal_claim_dict()
     bio = BytesIO(b"")
     upload = UploadFile(bio, filename="empty.png")
@@ -166,9 +167,9 @@ def test_multipart_empty_image_upload():
             return upload
         return default
 
-    with pytest.raises(HTTPException) as ei:
-        _run(parse_claim_http_request(_multipart_request(form_get)))
-    assert ei.value.status_code == 422
+    payload = _run(parse_claim_http_request(_multipart_request(form_get)))
+    assert "_image_bytes" not in payload
+    assert payload["claim_id"] == claim["claim_id"]
 
 
 def test_json_body_valid():
@@ -190,7 +191,7 @@ def test_multipart_flat_fields_with_file_alias():
     def form_get(key, default=None):
         if key == "claim_id":
             return "FLAT-1"
-        if key == "claim_amount":
+        if key == "amount":
             return "12.5"
         if key == "policy_limit":
             return "400"
@@ -202,6 +203,7 @@ def test_multipart_flat_fields_with_file_alias():
 
     payload = _run(parse_claim_http_request(_multipart_request(form_get)))
     assert payload["claim_id"] == "FLAT-1"
+    assert payload["amount"] == 12.5
     assert payload["claim_amount"] == 12.5
     assert payload["policy_limit"] == 400.0
     assert payload["description"] == "Hail on roof"

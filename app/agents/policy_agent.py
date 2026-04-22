@@ -10,6 +10,8 @@ class PolicyAgent(BaseAgent):
 
     async def _execute(self, input_data: dict[str, Any]) -> dict[str, Any]:
         raw_amount = input_data.get("claim_amount")
+        if raw_amount is None:
+            raw_amount = input_data.get("amount")
         raw_limit = input_data.get("policy_limit")
 
         try:

@@ -38,13 +38,14 @@ const aiCnnLabelEl = document.getElementById("aiCnnLabel");
 const aiCnnConfidenceEl = document.getElementById("aiCnnConfidence");
 const aiCnnSeverityEl = document.getElementById("aiCnnSeverity");
 const aiAnalysisBadgeEl = document.getElementById("aiAnalysisBadge");
-const aiAnalysisLoadingEl = document.getElementById("aiAnalysisLoading");
+const imageStatusEl = document.getElementById("imageStatus");
 const aiAnalysisErrorEl = document.getElementById("aiAnalysisError");
 const viewAiEvidenceBtn = document.getElementById("viewAiEvidenceBtn");
 const aiPipelineSummaryEl = document.getElementById("aiPipelineSummary");
 const aiPipelineChecklistEl = document.getElementById("aiPipelineChecklist");
 
 let latestDecisionClaimId = null;
+let agentTraceHostEl = null;
 
 const intelInsightsEl = document.getElementById("intelInsights");
 const intelErrorEl = document.getElementById("intelError");
@@ -246,6 +247,214 @@ function decisionPillClass(d) {
 function showDecisionEmpty() {
   if (decisionEmpty) decisionEmpty.classList.remove("hidden");
   if (decisionContent) decisionContent.classList.add("hidden");
+  renderAgentTrace(null);
+  const pel = document.getElementById("pipeline");
+  const cel = document.getElementById("caseStatus");
+  if (pel) pel.innerHTML = "";
+  if (cel) cel.innerHTML = "";
+  syncTimelineAndHeatmap(null);
+  syncImageProcessingStatus(false, false);
+}
+
+function renderPipeline(pipeline) {
+  return `
+     <div class="pipeline-box">
+       <h4>⚙️ AI Pipeline</h4>
+       <ul>
+         <li>${pipeline.cnn === true ? "✔ CNN" : "✖ CNN"}</li>
+         <li>${pipeline.rules === true ? "✔ Rules" : "✖ Rules"}</li>
+         <li>${pipeline.rag === true ? "✔ RAG" : "✖ RAG"}</li>
+         <li>${pipeline.llm === true ? "✔ LLM" : "✖ LLM"}</li>
+       </ul>
+     </div>
+  `;
+}
+
+function renderCaseStatus(status) {
+  const steps = ["OPEN", "UNDER_REVIEW", "APPROVED", "REJECTED"];
+  const s = String(status || "OPEN").toUpperCase();
+  return `    <div class="case-flow">
+       <h4>📂 Case Status</h4>
+       <div class="flow-steps">
+        ${steps
+          .map(
+            (step) =>
+              `<span class="step ${step === s ? "active" : ""}">${esc(step)}</span>`,
+          )
+          .join("")}
+       </div>
+     </div>
+  `;
+}
+
+function renderTimeline(timeline) {
+  const rows = Array.isArray(timeline) ? timeline : [];
+  if (!rows.length) {
+    return `<div class="timeline-box"><h4>🧭 Decision Timeline</h4><p class="muted">No trace available.</p></div>`;
+  }
+  return `    <div class="timeline-box">
+       <h4>🧭 Decision Timeline</h4>
+       <ul>
+        ${rows
+          .map(
+            (t) => `<li>
+          <span class="step-name">${esc(t?.step ?? "")}</span>
+          <span class="step-status">${esc(String(t?.status ?? ""))}</span>
+        </li>`,
+          )
+          .join("")}
+       </ul>
+     </div>
+  `;
+}
+
+function renderHeatmap(risk) {
+  const r = risk && typeof risk === "object" ? risk : {};
+  const fraudRaw = Number(r.fraud_score);
+  const fraudScore = Number.isFinite(fraudRaw) ? Math.min(1, Math.max(0, fraudRaw)) : 0;
+  const sev = String(r.severity || "MEDIUM").toUpperCase();
+  const ratioRaw = Number(r.amount_ratio);
+  const amountRatio = Number.isFinite(ratioRaw) ? Math.max(0, ratioRaw) : 0;
+
+  function color(val) {
+    if (val > 0.7) return "red";
+    if (val > 0.4) return "orange";
+    return "green";
+  }
+
+  const sevHeatClass = sev === "HIGH" ? "red" : "orange";
+
+  return `     <div class="heatmap-box">
+       <h4>🔥 Risk Heatmap</h4>
+       <div class="heatmap-row">
+         <div>Fraud Score</div>
+         <div class="heat ${color(fraudScore)}">${fraudScore.toFixed(2)}</div>
+       </div>
+       <div class="heatmap-row">
+         <div>Severity</div>
+         <div class="heat ${sevHeatClass}">${esc(sev)}</div>
+       </div>
+       <div class="heatmap-row">
+         <div>Claim Ratio</div>
+         <div class="heat ${color(amountRatio)}">${amountRatio.toFixed(2)}</div>
+       </div>
+     </div>
+  `;
+}
+
+function deriveTimelineFromPayload(out) {
+  if (Array.isArray(out?.timeline) && out.timeline.length) return out.timeline;
+  const rag = out?.agent_outputs?.rag;
+  const p =
+    out?.pipeline && typeof out.pipeline === "object"
+      ? out.pipeline
+      : inferPipelineFromResponse(out) || { cnn: false, rules: false, rag: false, llm: false };
+  const ragDone = p.rag === true;
+  const fraud = out?.agent_outputs?.fraud || {};
+  const fs = fraud.fraud_score;
+  const fraudDone =
+    p.llm === true ||
+    (fs !== null && fs !== undefined && Number.isFinite(Number(fs)));
+  const cnnDone = p.cnn === true;
+  const decision = String(out?.decision || "").trim().toUpperCase();
+  return [
+    { step: "Claim Received", status: "done" },
+    { step: "RAG Retrieval", status: ragDone ? "done" : "skipped" },
+    { step: "CNN Analysis", status: cnnDone ? "done" : "skipped" },
+    { step: "Fraud Agent (LLM)", status: fraudDone ? "done" : "skipped" },
+    { step: "Rule Engine", status: "done" },
+    { step: "Decision Fusion", status: "done" },
+    { step: "Final Decision", status: decision || "—" },
+  ];
+}
+
+function deriveRiskFromPayload(out) {
+  if (out?.risk && typeof out.risk === "object") {
+    const fs = Number(out.risk.fraud_score);
+    const ar = Number(out.risk.amount_ratio);
+    return {
+      fraud_score: Number.isFinite(fs) ? fs : 0,
+      severity: String(out.risk.severity || "MEDIUM").toUpperCase(),
+      amount_ratio: Number.isFinite(ar) ? ar : 0,
+    };
+  }
+  const fraudScore = extractFraudFromSubmit(out);
+  const fs =
+    fraudScore !== null && fraudScore !== undefined && Number.isFinite(Number(fraudScore))
+      ? Number(fraudScore)
+      : Number(out?.fraud_score);
+  const fraudN = Number.isFinite(fs) ? Math.min(1, Math.max(0, fs)) : 0;
+  const imgSignals = out?.agent_outputs?.image?.features?.signals;
+  const sevRaw =
+    out?.agent_outputs?.image?.features?.severity ?? out?.image_severity ?? imgSignals?.cnn_severity ?? out?.cnn_severity ?? "";
+  const sev = normalizeSeverity(sevRaw) || "MEDIUM";
+  const ent = out?.entities && typeof out.entities === "object" ? out.entities : {};
+  let amount = Number(ent.claim_amount ?? ent.amount ?? out?.claim_amount ?? out?.amount);
+  let limit = Number(ent.policy_limit ?? out?.policy_limit);
+  if (!Number.isFinite(amount)) amount = 0;
+  if (!Number.isFinite(limit)) limit = 0;
+  const amountRatio = limit > 0 ? Math.min(10, Math.max(0, amount / limit)) : amount > 0 ? 1 : 0;
+  return { fraud_score: fraudN, severity: sev, amount_ratio: amountRatio };
+}
+
+function syncTimelineAndHeatmap(out) {
+  const tel = document.getElementById("timeline");
+  const hel = document.getElementById("heatmap");
+  if (!tel || !hel) return;
+  if (!out) {
+    tel.innerHTML = "";
+    hel.innerHTML = "";
+    return;
+  }
+  const timeline = deriveTimelineFromPayload(out);
+  const risk = deriveRiskFromPayload(out);
+  tel.innerHTML = renderTimeline(timeline);
+  hel.innerHTML = renderHeatmap(risk);
+}
+
+function inferPipelineFromResponse(out) {
+  if (out?.pipeline && typeof out.pipeline === "object") return out.pipeline;
+  const rag = out?.agent_outputs?.rag;
+  const n = rag && typeof rag === "object" ? Number(rag.similar_claims_found) : NaN;
+  const fraud = out?.agent_outputs?.fraud || {};
+  const fs = fraud.fraud_score;
+  const fraudScoreOk = fs !== null && fs !== undefined && Number.isFinite(Number(fs));
+  const img = out?.agent_outputs?.image;
+  const cnnRan = Boolean(img?.features && img.features.present && Number(img?.processing_time_ms) > 0);
+  return {
+    cnn: Boolean(out?.cnn_used ?? cnnRan),
+    rules: true,
+    rag: Number.isFinite(n) ? n > 0 : false,
+    llm: fraudScoreOk,
+  };
+}
+
+function deriveCaseFlowStatus(out) {
+  const rs = String(out?.review_status || out?.reviewed_action || "").toUpperCase();
+  if (rs === "APPROVED" || rs === "REJECTED") return rs;
+  const cs = String(out?.case_status || "").trim().toUpperCase();
+  if (cs) return cs;
+  const d = String(out?.decision || "").toUpperCase();
+  if (d === "INVESTIGATE") return "UNDER_REVIEW";
+  if (d === "APPROVED" || d === "REJECTED") return d;
+  return "OPEN";
+}
+
+function syncPipelineAndCasePanels(out) {
+  const pel = document.getElementById("pipeline");
+  const cel = document.getElementById("caseStatus");
+  const pipeline =
+    out && out.pipeline && typeof out.pipeline === "object"
+      ? out.pipeline
+      : inferPipelineFromResponse(out) || { cnn: false, rules: false, rag: false, llm: false };
+  const pipelineSafe = {
+    cnn: pipeline.cnn === true,
+    rules: pipeline.rules === true,
+    rag: pipeline.rag === true,
+    llm: pipeline.llm === true,
+  };
+  if (pel) pel.innerHTML = renderPipeline(pipelineSafe);
+  if (cel) cel.innerHTML = renderCaseStatus(deriveCaseFlowStatus(out));
 }
 
 function fillDecisionPanel({
@@ -337,7 +546,7 @@ function updateDecisionPanelFromSubmit(out) {
       : pipeline.llmStatus === "used"
         ? "info"
         : "neutral";
-  const hasImage = Boolean(out?.agent_outputs?.image || out?.image_base64 || out?.has_image);
+  const hasImage = payloadIndicatesImageUsed(out);
   fillDecisionPanel({
     claimId: out?.claim_id,
     fraudScore: fraud,
@@ -364,6 +573,9 @@ function updateDecisionPanelFromSubmit(out) {
     hasImage,
     pipeline,
   });
+  syncPipelineAndCasePanels(out);
+  syncTimelineAndHeatmap(out);
+  renderAgentTrace(out);
 }
 
 function updateDecisionPanelFromClaim(it) {
@@ -404,6 +616,9 @@ function updateDecisionPanelFromClaim(it) {
     hasImage: Boolean(it.has_image),
     pipeline,
   });
+  syncPipelineAndCasePanels(it);
+  syncTimelineAndHeatmap(it);
+  renderAgentTrace(claimToTracePayload(it));
 }
 
 async function postClaimWithFallback() {
@@ -416,14 +631,15 @@ async function postClaimWithFallback() {
   const file = fieldFile?.files?.[0] || null;
 
   if (!claimId) throw new Error("Claim ID is required.");
+  if (!description) throw new Error("Description is required.");
   if (!Number.isFinite(claimAmount)) throw new Error("Claim amount must be a valid number.");
   if (!Number.isFinite(policyLimit)) throw new Error("Policy limit must be a valid number.");
 
   const fd = new FormData();
   fd.append("claim_id", claimId);
-  fd.append("claim_amount", String(claimAmount));
+  fd.append("amount", String(claimAmount));
   fd.append("policy_limit", String(policyLimit));
-  if (description) fd.append("description", description);
+  fd.append("description", description);
   if (file) fd.append("file", file);
 
   let res = await fetch("/claims", { method: "POST", body: fd });
@@ -431,9 +647,9 @@ async function postClaimWithFallback() {
     const dataUrl = await readFileAsDataUrl(file);
     const jsonBody = {
       claim_id: claimId,
-      claim_amount: claimAmount,
-      policy_limit: policyLimit,
-      ...(description ? { description } : {}),
+      description,
+      amount: parseFloat(String(claimAmount)),
+      policy_limit: parseFloat(String(policyLimit)),
       image_base64: dataUrl,
     };
     res = await fetch("/claims", {
@@ -472,6 +688,30 @@ function normalizeSeverity(s) {
   if (u === "MEDIUM" || u === "MODERATE") return "MEDIUM";
   if (u === "LOW" || u === "MINOR") return "LOW";
   return u;
+}
+
+function renderImageProcessing(hasImage, isProcessing) {
+  if (!hasImage) {
+    return `<div class="image-status-line image-status-line--idle"><span class="idle">📷 No image uploaded</span></div>`;
+  }
+  if (isProcessing) {
+    return `<div class="image-status-line image-status-line--loading"><span class="spinner" aria-hidden="true"></span><span class="loading">🔄 Analyzing image with AI…</span></div>`;
+  }
+  return `<div class="image-status-line image-status-line--done"><span class="done">✅ Image analysis complete</span></div>`;
+}
+
+function syncImageProcessingStatus(hasImage, isProcessing) {
+  if (!imageStatusEl) return;
+  imageStatusEl.innerHTML = renderImageProcessing(Boolean(hasImage), Boolean(isProcessing));
+}
+
+function payloadIndicatesImageUsed(out) {
+  if (out && typeof out.image_used === "boolean") return out.image_used;
+  const present = out?.agent_outputs?.image?.features?.present;
+  if (typeof present === "boolean") return present;
+  if (typeof out?.has_image === "boolean") return out.has_image;
+  const b64 = out?.image_base64;
+  return typeof b64 === "string" && b64.length > 0;
 }
 
 function setSeverityPill(el, sevRaw) {
@@ -514,22 +754,251 @@ function inferModelUsed(payload) {
   return "Fallback";
 }
 
+function ensureAgentTraceHost() {
+  if (agentTraceHostEl) return agentTraceHostEl;
+  const checklist = document.getElementById("aiPipelineChecklist");
+  const parent = checklist?.parentElement;
+  if (!parent) return null;
+  const el = document.createElement("section");
+  el.className = "agent-trace";
+  el.id = "agentTraceHost";
+  el.setAttribute("aria-label", "Agent execution trace");
+  el.hidden = true;
+  checklist.insertAdjacentElement("afterend", el);
+  agentTraceHostEl = el;
+  return el;
+}
+
+function parseExplanationJson(raw) {
+  const t = String(raw || "").trim();
+  if (!t || t[0] !== "{") return null;
+  try {
+    const j = JSON.parse(t);
+    return j && typeof j === "object" ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+function traceRagLineFromPayload(payload) {
+  const rag = payload?.agent_outputs?.rag;
+  if (rag && typeof rag === "object") {
+    if (rag.enabled === false) return "RAG → disabled";
+    const n = Number(rag.similar_claims_found);
+    if (Number.isFinite(n)) {
+      const w = n === 1 ? "claim" : "claims";
+      return `RAG → ${n} similar ${w} found`;
+    }
+  }
+  const expl = payload?.agent_outputs?.fraud?.explanation;
+  const ref = typeof expl === "object" && expl ? String(expl.similar_case_reference || "").trim() : "";
+  if (ref) return "RAG → similar-case context attached";
+  const stored = parseExplanationJson(payload?.explanation);
+  const ref2 = String(stored?.similar_case_reference || "").trim();
+  if (ref2) return "RAG → similar-case reference on file";
+  return "RAG → 0 similar claims found";
+}
+
+function traceCnnLineFromPayload(payload) {
+  const imgSignals = payload?.agent_outputs?.image?.features?.signals;
+  const labelRaw =
+    payload?.cnn_label ||
+    imgSignals?.cnn_label ||
+    payload?.agent_outputs?.image?.features?.damage_type ||
+    payload?.image_damage_type ||
+    "";
+  const label = String(labelRaw || "").trim() || "unknown";
+  const confRaw =
+    payload?.cnn_confidence ??
+    imgSignals?.cnn_confidence ??
+    payload?.agent_outputs?.image?.features?.confidence ??
+    null;
+  const conf = confRaw === null || confRaw === undefined ? null : Number(confRaw);
+  const confStr = conf !== null && Number.isFinite(conf) ? fmt2(conf) : "—";
+  const img = payload?.agent_outputs?.image;
+  const hasImage = Boolean(img?.features?.present ?? payload?.has_image ?? false);
+  if (!hasImage && !labelRaw) return "CNN → no image";
+  if (String(img?.features?.reason || "").trim() === "disabled") return "CNN → disabled";
+  return `CNN → ${label} (${confStr})`;
+}
+
+function traceFraudLineFromPayload(payload) {
+  const fraud = payload?.agent_outputs?.fraud || {};
+  const skipped = Boolean(fraud._llm_skipped);
+  const score = fraud.fraud_score;
+  const n = score === null || score === undefined ? null : Number(score);
+  const scoreStr = n !== null && Number.isFinite(n) ? fmt2(n) : "—";
+  if (skipped) return `FraudAgent → score=${scoreStr} (LLM skipped)`;
+  return `FraudAgent → score=${scoreStr}`;
+}
+
+function traceDecisionLineFromPayload(payload) {
+  const d = String(payload?.agent_outputs?.decision?.decision || payload?.decision || "").trim().toUpperCase();
+  return d ? `DecisionAgent → ${d}` : "DecisionAgent → —";
+}
+
+function traceHitlLineFromPayload(payload) {
+  if (Boolean(payload?.hitl_needed)) return "HITL → Review Required";
+  return "HITL → Not required";
+}
+
+function traceFusionSummaryFromPayload(payload) {
+  const dec = payload?.agent_outputs?.decision;
+  if (!dec || typeof dec !== "object") return "Policy + signals";
+  const fused = dec.fused_fraud_score;
+  const fn = fused === null || fused === undefined ? null : Number(fused);
+  if (fn !== null && Number.isFinite(fn)) return `Fused fraud ${fmt2(fn)}`;
+  return "Policy + fraud fusion";
+}
+
+function traceOrchestratorDetail(payload) {
+  const cid = String(payload?.claim_id || "").trim();
+  return cid ? `claim ${cid}` : "pipeline start";
+}
+
+function traceRagStepDetail(payload) {
+  const rag = payload?.agent_outputs?.rag;
+  if (rag && typeof rag === "object" && rag.enabled === false) return "disabled";
+  if (rag && typeof rag === "object" && Number.isFinite(Number(rag.retrieval_ms))) {
+    return `${Number(rag.similar_claims_found) || 0} hits · ${Math.round(Number(rag.retrieval_ms))} ms`;
+  }
+  const line = traceRagLineFromPayload(payload);
+  return line.replace(/^RAG → /, "");
+}
+
+function traceCnnStepDetail(payload) {
+  const img = payload?.agent_outputs?.image;
+  if (img && img.enabled === false) return "disabled";
+  if (!img?.features?.present) return "no image";
+  const ms = img.processing_time_ms;
+  if (ms !== null && ms !== undefined && Number.isFinite(Number(ms))) return `${Math.round(Number(ms))} ms`;
+  return "completed";
+}
+
+function traceFraudStepDetail(payload) {
+  const fraud = payload?.agent_outputs?.fraud || {};
+  if (fraud._llm_skipped) return "LLM skipped (rules)";
+  if (payload?.llm_used || payload?.metadata?.llm_used) return "LLM completed";
+  return "deterministic";
+}
+
+function renderAgentTrace(payload) {
+  const host = ensureAgentTraceHost();
+  if (!host) return;
+  if (!payload) {
+    host.innerHTML = "";
+    host.hidden = true;
+    return;
+  }
+
+  const orch = traceOrchestratorDetail(payload);
+  const ragD = traceRagStepDetail(payload);
+  const cnnD = traceCnnStepDetail(payload);
+  const fraudD = traceFraudStepDetail(payload);
+  const fusionD = traceFusionSummaryFromPayload(payload);
+  const hitlD = Boolean(payload.hitl_needed) ? "Review queue" : "No queue";
+
+  const bullets = [
+    traceRagLineFromPayload(payload),
+    traceCnnLineFromPayload(payload),
+    traceFraudLineFromPayload(payload),
+    traceDecisionLineFromPayload(payload),
+    traceHitlLineFromPayload(payload),
+  ];
+
+  const steps = [
+    { name: "Orchestrator Start", detail: esc(orch) },
+    { name: "RAG Retrieval", detail: esc(ragD) },
+    { name: "CNN Analysis", detail: esc(cnnD) },
+    { name: "Fraud Agent (LLM)", detail: esc(fraudD) },
+    { name: "Decision Fusion", detail: esc(fusionD) },
+    { name: "HITL Decision", detail: esc(hitlD) },
+  ];
+
+  host.hidden = false;
+  host.innerHTML = `
+    <div class="agent-trace__title">Agent Execution Trace</div>
+    <div class="agent-trace__steps">
+      ${steps
+        .map(
+          (s) => `<div class="agent-trace__step">
+        <span class="agent-trace__step-name">${esc(s.name)}</span>
+        <span class="agent-trace__step-detail">${s.detail}</span>
+      </div>`,
+        )
+        .join("")}
+    </div>
+    <div class="agent-trace__subhead">Agent Trace:</div>
+    <ul class="agent-trace__list">
+      ${bullets.map((b) => `<li>${esc(b)}</li>`).join("")}
+    </ul>
+  `;
+}
+
+function claimToTracePayload(it) {
+  if (!it) return null;
+  const md = it.metadata && typeof it.metadata === "object" ? it.metadata : {};
+  const expl = parseExplanationJson(it.explanation);
+  return {
+    claim_id: it.claim_id,
+    decision: it.decision,
+    hitl_needed: it.hitl_needed,
+    llm_used: it.llm_used,
+    cnn_label: it.cnn_label || it.image_damage_type,
+    cnn_confidence: it.cnn_confidence,
+    has_image: it.has_image,
+    explanation: it.explanation,
+    agent_outputs: {
+      fraud: {
+        fraud_score: it.fraud_score,
+        explanation: expl || {},
+      },
+      image: {
+        features: {
+          present: Boolean(it.has_image),
+          damage_type: it.image_damage_type,
+          severity: it.image_severity,
+          signals: {
+            cnn_label: it.cnn_label || it.image_damage_type,
+            cnn_confidence: it.cnn_confidence,
+          },
+        },
+      },
+      decision: { decision: it.decision },
+      rag: null,
+    },
+    metadata: md,
+  };
+}
+
 function normalizePipelineMetadata(payload) {
   const md = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : null;
+  const pipe = payload?.pipeline && typeof payload.pipeline === "object" ? payload.pipeline : null;
   const decisionSource = String(md?.decision_source || payload?.decision_source || "").toLowerCase() || "fallback";
   const cnnUsedRaw =
-    payload?.cnn_used ??
-    md?.cnn_used ??
-    (payload?.cnn_label && String(payload.cnn_label).toLowerCase() !== "unknown"
+    pipe?.cnn === true
       ? true
-      : false);
+      : pipe?.cnn === false
+        ? false
+        : (payload?.cnn_used ??
+            md?.cnn_used ??
+            (payload?.cnn_label && String(payload.cnn_label).toLowerCase() !== "unknown"
+              ? true
+              : false));
   const cnnUsed = Boolean(cnnUsedRaw);
 
+  const fraud = payload?.agent_outputs?.fraud || {};
+  const fs = fraud.fraud_score;
+  const fraudScoreOk = fs !== null && fs !== undefined && Number.isFinite(Number(fs));
   const llmUsedRaw =
-    payload?.llm_used ??
-    md?.llm_used ??
-    (payload?.agent_outputs?.fraud?.source === "LLM" ? true : undefined);
-  const llmUsed = Boolean(llmUsedRaw);
+    pipe?.llm === true
+      ? true
+      : pipe?.llm === false
+        ? false
+        : (payload?.llm_used ??
+            md?.llm_used ??
+            (payload?.agent_outputs?.fraud?.source === "LLM" ? true : undefined));
+  const llmUsed = pipe ? pipe.llm === true : Boolean(llmUsedRaw) || fraudScoreOk;
 
   // Rules are always part of the pipeline (policy + deterministic logic).
   const rulesUsed = true;
@@ -539,7 +1008,12 @@ function normalizePipelineMetadata(payload) {
     (decisionSource === "rule" || decisionSource === "fallback" ? true : false);
   const fallbackUsed = Boolean(fallbackUsedRaw);
 
-  const llmStatus = llmUsed ? "used" : "skipped";
+  let llmStatus = "skipped";
+  if (pipe?.llm === true || llmUsed) {
+    llmStatus = "used";
+  } else if (md?.llm_status === "failed" || decisionSource === "fallback") {
+    llmStatus = "failed";
+  }
   const llmFailureReason = String(md?.llm_failure_reason || "");
   const contributorsRaw = Array.isArray(md?.contributors) ? md.contributors : [];
   const contributors = contributorsRaw.map((x) => String(x || "").toLowerCase()).filter(Boolean);
@@ -633,7 +1107,7 @@ function setAiAnalysisState({
   }
   if (pipeline) setPipelineChecklist(pipeline);
 
-  if (aiAnalysisLoadingEl) aiAnalysisLoadingEl.hidden = !Boolean(loading);
+  syncImageProcessingStatus(hasImage, loading);
   if (aiAnalysisErrorEl) {
     aiAnalysisErrorEl.hidden = !String(error || "").trim();
     aiAnalysisErrorEl.textContent = String(error || "");
@@ -1479,6 +1953,7 @@ if (claimForm) {
     setFormSubmitting(true);
     setStatus("");
     let submittedClaimId = latestDecisionClaimId;
+    const submitHasImage = Boolean(fieldFile?.files?.[0]);
     setAiAnalysisState({
       claimId: latestDecisionClaimId,
       modelUsed: "CNN",
@@ -1491,7 +1966,7 @@ if (claimForm) {
       badgeTone: "info",
       loading: true,
       error: "",
-      hasImage: true,
+      hasImage: submitHasImage,
       pipeline: null,
     });
     try {
@@ -1546,24 +2021,6 @@ if (claimForm) {
       });
     } finally {
       setFormSubmitting(false);
-      // Hard guarantee: never leave the AI analysis loader stuck on.
-      if (aiAnalysisLoadingEl && !aiAnalysisLoadingEl.hidden) {
-        setAiAnalysisState({
-          claimId: submittedClaimId || latestDecisionClaimId,
-          modelUsed: "—",
-          confidence: null,
-          severity: "",
-          cnnLabel: aiCnnLabelEl?.textContent || "",
-          cnnConfidence: aiCnnConfidenceEl?.textContent || "",
-          cnnSeverity: aiCnnSeverityEl?.textContent || "",
-          badgeText: aiAnalysisBadgeEl && !aiAnalysisBadgeEl.hidden ? aiAnalysisBadgeEl.textContent : "",
-          badgeTone: "",
-          loading: false,
-          error: "",
-          hasImage: true,
-          pipeline: null,
-        });
-      }
     }
   });
 }

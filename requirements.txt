@@ -12,5 +12,9 @@ torchvision
 # Local embedded vector DB (persistent)
 chromadb
 
+# Post-decision RAG + optional local LLM explanation
+sentence-transformers
+ollama
+
 pytest
 pytest-asyncio
