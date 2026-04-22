@@ -1,7 +1,26 @@
 import datetime
+import os
 
 import gradio as gr
+import gradio_client.utils as _gcu
 import numpy as np
+
+
+def _patch_gradio_client_json_schema():
+    """HF / Gradio 4.44.x: api_info crashes when schema uses additionalProperties: true (bool)."""
+    _orig = _gcu._json_schema_to_python_type
+
+    def _safe(schema, defs=None):
+        if schema is True or schema is False:
+            return "Any"
+        if not isinstance(schema, dict):
+            return "Any"
+        return _orig(schema, defs)
+
+    _gcu._json_schema_to_python_type = _safe
+
+
+_patch_gradio_client_json_schema()
 
 
 HISTORY = [
@@ -222,6 +241,7 @@ def analyze_claim(claim_id: str, desc: str, amount, policy, image):
     except (TypeError, ValueError):
         policy_f = 0.0
 
+    llm_used = False
     has_image = _image_uploaded(image)
     if not has_image:
         cnn_label = None
@@ -235,131 +255,133 @@ def analyze_claim(claim_id: str, desc: str, amount, policy, image):
         cnn_label = label
 
     decision, fraud_score = rule_engine(amount_f, policy_f, severity)
-    similar = retrieve_similar(desc or "")
+    fraud_score = float(fraud_score or 0.0)
 
-    rag_text = ""
+    similar = retrieve_similar(desc or "")
+    rag_data = bool(similar)
+
+    rag_text_lines = []
     approved = 0
     rejected = 0
     for s in similar:
-        rag_text += f"- {s['id']} → {s['decision']} (${s['amount']})\n"
+        rag_text_lines.append(f"- {s['id']} → {s['decision']} (${s['amount']})")
         if s.get("decision") == "APPROVED":
             approved += 1
         else:
             rejected += 1
+    rag_list_md = "\n".join(rag_text_lines) if rag_text_lines else "_No similar historical claims matched._"
 
-    rag_summary_body = f"""
-* Similar claims found: {len(similar)}
-* Approved: {approved}
-* Rejected: {rejected}
-  """
-    rag_markdown = rag_summary_body + ("\n" + rag_text if rag_text else "")
-    rag_hits = bool(similar)
-
-    result = {
-        "decision": decision,
-        "fraud_score": fraud_score,
-        "severity": severity,
-        "cnn_label": cnn_label,
-        "rag_summary": rag_markdown.strip() if rag_hits else "",
-        "amount": amount_f,
-        "policy_limit": policy_f,
-        "llm_used": False,
-    }
-
-    pipeline = {
-        "CNN": "✔ Used" if result.get("cnn_label") else "✖ Not Used",
-        "Rules": "✔ Used",
-        "RAG": "✔ Used" if result.get("rag_summary") else "✖ Not Used",
-        "LLM": "✔ Used" if result.get("llm_used") else "✖ Not Used",
-    }
-
-    timeline = [
-        "✔ Claim Received",
-        "✔ RAG Retrieval" if result.get("rag_summary") else "✖ RAG Skipped",
-        "✔ CNN Analysis" if result.get("cnn_label") else "✖ CNN Skipped",
-        "✔ Rule Engine",
-        "✔ Decision Fusion",
-        f"🎯 Final: {result.get('decision')}",
-    ]
-
-    policy_lim = result.get("policy_limit") or 0
-    amt = result.get("amount") or 0
-    if policy_lim and policy_lim > 0:
-        ratio_s = f"{round(amt / policy_lim, 2)}"
+    policy_limit = policy_f if policy_f else 0.0
+    if policy_limit > 0:
+        claim_ratio = round(amount_f / policy_limit, 2)
     else:
-        ratio_s = "N/A (no policy limit)"
+        claim_ratio = "N/A (no policy limit)"
 
-    fs = result.get("fraud_score")
-    fs_s = f"{float(fs):.2f}" if fs is not None else "—"
+    pipeline_text = f"""
+### ⚙️ AI Pipeline
 
-    risk_md = f"""
-* **Fraud Score**: {fs_s}
-* **Severity**: {result.get("severity")}
-* **Claim Ratio**: {ratio_s}
+* CNN: {'✔ Used' if cnn_label else '✖ Not Used'}
+* Rules: ✔ Used
+* RAG: {'✔ Used' if rag_data else '✖ Not Used'}
+* LLM: {'✔ Used' if llm_used else '✖ Skipped'}
 """
 
-    timeline_md = "\n".join(f"* {row}" for row in timeline)
-    pipeline_md = "\n".join(f"* **{k}**: {v}" for k, v in pipeline.items())
+    timeline_text = f"""
+### 🧭 Decision Timeline
 
-    band = risk_band(fraud_score)
-    pipeline_exp = pipeline_explanation(severity, amount_f)
-    rules_exp = rule_explanation(severity, amount_f, policy_f)
-    confidence_md = confidence_breakdown(cnn_conf if cnn_conf is not None else 0.0, fraud_score)
-    cf = counterfactual(amount_f, policy_f)
+* Claim Received
+* {'RAG Retrieval' if rag_data else 'RAG Skipped'}
+* {'CNN Analysis' if cnn_label else 'CNN Skipped'}
+* Rule Engine
+* Decision Fusion
+* Final: {decision}
+"""
 
-    badge = decision_badge(decision)
-    risk_html = risk_bar_html(fraud_score)
-    note = narrative(fraud_score)
+    risk_text = f"""
+### 🔥 Risk Heatmap
 
-    summary = f"""
-
-* Claim ID: {claim_id}
-* Decision: {decision}
-* Risk Level: {severity}
-* Risk Band: {band}
-* Fraud Score: {fraud_score}
-* Narrative: {note}
-  """
-
-    label_disp = label if label is not None else "—"
-    conf_disp = cnn_conf if cnn_conf is not None else "—"
-    signals = f"""
-
-* Damage Type: {label_disp} ({conf_disp})
-* Claim Amount: {amount_f}
-* Policy Limit: {policy_f}
-* Image: {cnn_note}
-  """
-
-    final_reason = f"""
-Decision '{decision}' is based on:
+* Fraud Score: {fraud_score:.2f}
 * Severity: {severity}
-* Fraud score: {fraud_score}
-* Historical patterns: {approved} approved vs {rejected} rejected
-  """
+* Claim Ratio: {claim_ratio}
+"""
 
     HISTORY.append({"id": claim_id, "desc": desc, "amount": amount_f, "decision": decision})
     log_decision(claim_id, decision, fraud_score)
 
-    cnn_out = cnn_note if not has_image else f"{cnn_note} — {label} ({cnn_conf})"
+    cnn_out = str(cnn_label) if cnn_label else "N/A"
+    if has_image and label is not None:
+        cnn_out = f"{cnn_note} — {label} ({cnn_conf})"
+
+    severity_s = str(severity) if severity is not None else "N/A"
+    decision_s = str(decision) if decision is not None else "N/A"
+
+    band = risk_band(fraud_score)
+    note = narrative(fraud_score)
+    label_disp = str(label) if label is not None else "N/A (no image — severity inferred from description)"
+    try:
+        conf_disp = f"{float(cnn_conf):.2f}" if cnn_conf is not None else "—"
+    except (TypeError, ValueError):
+        conf_disp = "—"
+
+    summary_md = f"""
+### 🧠 Decision Summary
+
+* **Claim ID**: {claim_id or "(not provided)"}
+* **Decision**: **{decision_s}**
+* **Risk level**: {severity_s}
+* **Risk band**: {band}
+* **Fraud score**: {fraud_score:.2f}
+* **Narrative**: {note}
+"""
+
+    signals_md = f"""
+### 🔍 Key Signals
+
+* **Damage type (CNN simulation)**: {label_disp} (confidence {conf_disp})
+* **Description**: {desc or "(empty)"}
+* **Claim amount**: ${amount_f:.2f}
+* **Policy limit**: ${policy_f:.2f}
+* **Image**: {cnn_note}
+"""
+
+    rag_md = f"""
+### 📊 RAG Summary
+
+* **Similar claims found**: {len(similar)}
+* **Approved vs rejected (in sample)**: {approved} approved, {rejected} rejected
+
+{rag_list_md}
+"""
+
+    final_reason_md = f"""
+### ⚖️ Final Justification
+
+Decision **{decision_s}** reflects severity **{severity_s}**, fraud score **{fraud_score:.2f}**, and historical patterns in this demo store (**{approved}** approved vs **{rejected}** rejected among retrieved neighbors).
+"""
+
+    pipeline_exp_md = f"### 🧠 AI Pipeline Explanation\n{pipeline_explanation(severity_s, amount_f).strip()}"
+    rules_body = rule_explanation(severity_s, amount_f, policy_f)
+    rules_md = f"### ⚖️ Rule Triggers\n\n{rules_body}"
+    cnn_conf_for_conf = 0.0 if cnn_conf is None else cnn_conf
+    confidence_md = f"### 📊 Confidence Breakdown\n{confidence_breakdown(cnn_conf_for_conf, fraud_score).strip()}"
+    cf_md = f"### 🔍 What-if Analysis\n\n{counterfactual(amount_f, policy_f)}"
 
     return (
-        badge,
-        f"{fraud_score:.2f}",
-        severity,
+        decision_s,
+        fraud_score,
+        severity_s,
         cnn_out,
-        timeline_md,
-        pipeline_md,
-        risk_md,
-        risk_html,
-        summary,
-        signals,
-        rag_markdown,
-        final_reason,
-        pipeline_exp,
-        rules_exp,
-        confidence_md,
-        cf,
+        timeline_text.strip(),
+        pipeline_text.strip(),
+        risk_text.strip(),
+        summary_md.strip(),
+        signals_md.strip(),
+        rag_md.strip(),
+        final_reason_md.strip(),
+        pipeline_exp_md.strip(),
+        rules_md.strip(),
+        confidence_md.strip(),
+        cf_md.strip(),
     )
 
 
@@ -380,14 +402,13 @@ with gr.Blocks() as demo:
                 fraud_btn = gr.Button("🚨 Fraud")
 
         with gr.Column():
-            decision = gr.HTML(label="Decision")
-            fraud = gr.Textbox(label="Fraud Score")
+            decision = gr.Textbox(label="Decision")
+            fraud = gr.Number(label="Fraud Score")
             severity = gr.Textbox(label="Severity")
-            cnn = gr.Textbox(label="CNN Output")
+            cnn = gr.Textbox(label="CNN / damage signal")
             timeline_output = gr.Markdown(label="🧭 Decision Timeline")
             pipeline_output = gr.Markdown(label="⚙️ AI Pipeline")
             heatmap_output = gr.Markdown(label="🔥 Risk Heatmap")
-            risk_bar = gr.HTML(label="Risk Meter")
 
     with gr.Accordion("🧠 Decision Summary", open=True):
         summary = gr.Markdown()
@@ -433,7 +454,6 @@ with gr.Blocks() as demo:
             timeline_output,
             pipeline_output,
             heatmap_output,
-            risk_bar,
             summary,
             signals,
             rag,
@@ -447,4 +467,5 @@ with gr.Blocks() as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    _port = int(os.environ.get("PORT") or os.environ.get("GRADIO_SERVER_PORT") or 7860)
+    demo.launch(server_name="0.0.0.0", server_port=_port)

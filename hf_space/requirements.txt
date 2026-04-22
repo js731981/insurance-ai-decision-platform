@@ -1,5 +1,8 @@
-gradio==4.31.0
-huggingface_hub==0.19.4
+# 4.31.x hits gradio_client bug: TypeError on api_info when schema uses
+# additionalProperties: true (bool). Spaces /api needs fixed client.
+gradio==4.44.1
+# Gradio 4.44.x imports huggingface_hub.HfFolder; hub 1.0+ removed it → cap below 1.0
+huggingface_hub>=0.23.0,<1.0
 fastapi==0.112.4
 uvicorn
 websockets
